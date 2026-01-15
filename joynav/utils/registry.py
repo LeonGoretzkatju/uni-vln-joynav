@@ -187,10 +187,8 @@ def parse_component_args(
             args_class = selector.get_dataset_classes().get_argument_class()
             args_classes.append(args_class)
         elif comp_type == 'model':
-            model_info = selector.get_model_classes().get_argument_class()
-            if model_info:
-                _, args_class = model_info
-                args_classes.append(args_class)
+            args_class = selector.get_model_classes().get_argument_class()
+            args_classes.append(args_class)
     
     # Parse full arguments
     full_parser = transformers.HfArgumentParser(tuple(args_classes))

@@ -25,25 +25,19 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
-from trainer import replace_qwen2_vl_attention_class
-
 from transformers import (
+    AutoProcessor,
+    Trainer,
     Qwen2VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMoeForConditionalGeneration
 )
-from typing import Dict
-from joynav.model.joynav_qwen3_vl import JoyNav_Qwen3VLForCausalLM
-from joynav.model.joynav_qwen2_5_vl import JoyNav_Qwen2_5_VLForCausalLM
-from joynav.dataset.vln_action_dataset import VLNActionDataset
-from joynav.train.argument import (
-    ModelArguments,
-    TrainingArguments,
-)
+import joynav.model
 import joynav.dataset
-from joynav.utils.registry import parse_component_args, get_component
-from transformers import AutoProcessor, Trainer
+from joynav.utils.registry import get_component, parse_component_args
+from joynav.train.argument import TrainingArguments
+from trainer import replace_qwen2_vl_attention_class
 
 local_rank = None
 
@@ -52,7 +46,7 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
-def make_supervised_data_module(processor, data_args) -> Dict:
+def make_supervised_data_module(processor, data_args) -> dict:
     """Make dataset and collator for supervised fine-tuning."""
     
     data_class = get_component('dataset', data_args.dataset_type)
@@ -108,36 +102,26 @@ def set_model(model_args, model):
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
-    model_args, training_args, data_args = parse_component_args(
-        additional_args_classes=(ModelArguments, TrainingArguments,), component_types=['dataset']
+    training_args, data_args, model_args = parse_component_args(
+        additional_args_classes=(TrainingArguments,), component_types=['dataset', 'model']
     )
 
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
-    if "qwen3" in model_args.model_name_or_path.lower():
-        model = JoyNav_Qwen3VLForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
+    model_class = get_component('model', data_args.model_type)
+    model = model_class.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        attn_implementation=attn_implementation,
+        dtype=(torch.bfloat16 if training_args.bf16 else None),
+    )
+
+    if "qwen3_vl" in data_args.model_type:
         data_args.model_type = "qwen3vl"
-    elif "qwen2.5" in model_args.model_name_or_path.lower():
-        model = JoyNav_Qwen2_5_VLForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
+    elif "qwen2_5_vl" in data_args.model_type:
         data_args.model_type = "qwen2.5vl"
     else:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
         data_args.model_type = "qwen2vl"
 
     print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
