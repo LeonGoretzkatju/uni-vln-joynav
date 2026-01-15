@@ -7,52 +7,44 @@ import torch
 import copy
 import numpy as np
 from typing import Dict, Optional, Sequence, List, Tuple, Any
-from .data_processor import (
-    rank0_print, update_processor_pixels,
-    get_rope_index_25, get_rope_index_2, get_rope_index_3,
-    LazySupervisedDataset, preprocess_qwen_visual,
-    DEFAULT_IMAGE_TOKEN
-)
+from .lazy_supervised_dataset import LazySupervisedDataset, preprocess_qwen_visual, rank0_print, DEFAULT_IMAGE_TOKEN
+
+from .base_dataset_args import BaseDatasetArguments
+from .vln_action_dataset_args import VLNActionDatasetArguments
+
 
 class VLNActionDataset(LazySupervisedDataset):
-    """Dataset for supervised fine-tuning."""
+    """
+    Dataset for Vision-Language Navigation with Action Prediction.
+    Inherits from LazySupervisedDataset and provides VLN-specific functionality.
+    """
 
-    def __init__(self, processor, data_args):
-        random.seed(data_args.dataset_seed)
+    # Specify the corresponding collator class
+    ARGUMENT_CLASS = VLNActionDatasetArguments
+
+    def __init__(self, processor, data_args: BaseDatasetArguments):
+        """
+        Initialize VLN Action Dataset.
+        
+        Args:
+            processor: The processor for handling images/videos
+            data_args: VLN-specific dataset arguments
+        """
+        # Validate args type
+        if not isinstance(data_args, VLNActionDatasetArguments):
+            raise TypeError(
+                f"data_args must be VLNActionDatasetArguments, got {type(data_args)}"
+            )
+        
+        # VLN-specific attributes (set before calling super().__init__)
         self.num_frames = data_args.num_frames
         self.num_history = data_args.num_history
         self.num_future_steps = data_args.num_future_steps
         self.remove_init_turns = data_args.remove_init_turns
 
-        self.video_max_total_pixels = getattr(
-            data_args, "video_max_total_pixels", 1664 * 28 * 28
-        )
-        self.video_min_total_pixels = getattr(
-            data_args, "video_min_total_pixels", 256 * 28 * 28
-        )
-        self.model_type = data_args.model_type
-        if data_args.model_type == "qwen3vl":
-            self.get_rope_index = get_rope_index_3
-        elif data_args.model_type == "qwen2.5vl":
-            self.get_rope_index = get_rope_index_25
-        elif data_args.model_type == "qwen2vl":
-            self.get_rope_index = get_rope_index_2
-        else:
-            raise ValueError(f"model_type: {data_args.model_type} not supported")
-
-        list_data_dict = self.load_data(data_args)
-        random.shuffle(list_data_dict)  # Randomly shuffle the data for training
-
-        rank0_print("Formatting inputs...Skip in lazy mode")
-        processor = update_processor_pixels(processor, data_args)
-        self.processor = processor
-        self.tokenizer = processor.tokenizer
-        self.data_args = data_args
-        self.merge_size = getattr(processor.image_processor, "merge_size", 2)
-        self.list_data_dict = list_data_dict
-
-        self.item_fn = self._get_item
+        super().__init__(processor, data_args)
         
+        # VLN-specific setup
         self.idx2actions = {
             '0': 'STOP',
             '1': "↑",
@@ -60,17 +52,27 @@ class VLNActionDataset(LazySupervisedDataset):
             '3': "→",
         }
         self.conjunctions = [
-                                'you can see ',
-                                'in front of you is ',
-                                'there is ',
-                                'you can spot ',
-                                'you are toward the ',
-                                'ahead of you is ',
-                                'in your sight is '
-                            ]    
-        prompt = f"You are an autonomous navigation assistant. Your task is to <instruction>. Devise an action sequence to follow the instruction using the four actions: TURN LEFT (←) or TURN RIGHT (→) by 15 degrees, MOVE FORWARD (↑) by 25 centimeters, or STOP."
+            'you can see ',
+            'in front of you is ',
+            'there is ',
+            'you can spot ',
+            'you are toward the ',
+            'ahead of you is ',
+            'in your sight is '
+        ]
+        
+        prompt = (
+            "You are an autonomous navigation assistant. Your task is to <instruction>. "
+            "Devise an action sequence to follow the instruction using the four actions: "
+            "TURN LEFT (←) or TURN RIGHT (→) by 15 degrees, MOVE FORWARD (↑) by 25 centimeters, "
+            "or STOP."
+        )
         answer = ""
-        self.conversations = [{"from": "human", "value": prompt}, {"from": "gpt", "value": answer}]
+        self.conversations = [
+            {"from": "human", "value": prompt}, 
+            {"from": "gpt", "value": answer}
+        ]
+
 
         rank0_print(f"================ Sample data ================")
         for i in random.sample(range(len(self.list_data_dict)), 3):
@@ -95,11 +97,12 @@ class VLNActionDataset(LazySupervisedDataset):
         cleaned_str = re.sub(pattern, replacer, decoded_str)
         return cleaned_str
         
-    def load_data(self, data_args):
-        self.video_folder = data_args.video_folder.split(',')
-
-        self.nav_data =[]
-        for vf in self.video_folder:
+    def load_data(self):
+        """Load VLN navigation data from video folders."""
+        video_folder = self.data_args.video_folder.split(',')
+        
+        self.nav_data = []
+        for vf in video_folder:
             anno_json = json.load(open(os.path.join(vf, 'annotations.json'), 'r'))
             for tdata in anno_json:
                 tdata['video'] = os.path.join(vf, tdata['video'])
@@ -134,7 +137,9 @@ class VLNActionDataset(LazySupervisedDataset):
                 # for start_idx in range(0, actions_len - valid_idx):
                 #     list_data_dict.append((ep_id, ins_id, start_idx, valid_idx))
         rank0_print(f"Loaded {len(list_data_dict)} samples from {len(self.nav_data)} annotations.")
-        return list_data_dict
+        random.shuffle(list_data_dict)
+
+        self.list_data_dict = list_data_dict
 
     def actions2text(self, actions):
         converted_sequence = []         
@@ -166,50 +171,6 @@ class VLNActionDataset(LazySupervisedDataset):
             t += 1
             sources.extend(source)
         return sources
-
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        num_base_retries = 3
-        num_final_retries = 30
-
-        # try the current sample first
-        for attempt_idx in range(num_base_retries):
-            try:
-                sources = self.prepare_sources(i)
-                if isinstance(sources, dict):
-                    sources = [sources]
-                sample = self.item_fn(sources)
-                return sample
-            except Exception as e:
-                # sleep 1s in case it is a cloud disk issue
-                print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
-                time.sleep(1)
-
-        # try other samples, in case it is file corruption issue
-        for attempt_idx in range(num_base_retries):
-            try:
-                next_index = min(i + 1, len(self.list_data_dict) - 1)
-                sources = self.prepare_sources(next_index)
-                if isinstance(sources, dict):
-                    sources = [sources]
-
-                sample = self.item_fn(sources)
-                return sample
-            except Exception as e:
-                # no need to sleep
-                print(
-                    f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
-                    e,
-                )
-                pass
-
-        try:
-            sources = self.prepare_sources(i)
-            if isinstance(sources, dict):
-                sources = [sources]
-            sample = self.item_fn(sources)
-            return sample
-        except Exception as e:
-            raise e
     
     def prepare_sources(self, i):
         ep_id, ins_id, start_idx, valid_idx = self.list_data_dict[i]

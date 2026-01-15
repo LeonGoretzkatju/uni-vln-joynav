@@ -36,13 +36,13 @@ from transformers import (
 from typing import Dict
 from joynav.model.joynav_qwen3_vl import JoyNav_Qwen3VLForCausalLM
 from joynav.model.joynav_qwen2_5_vl import JoyNav_Qwen2_5_VLForCausalLM
-from joynav.dataset.data_processor import LazySupervisedDataset, DataCollatorForSupervisedDataset, FlattenedDataCollatorForSupervisedDataset
 from joynav.dataset.vln_action_dataset import VLNActionDataset
 from joynav.train.argument import (
     ModelArguments,
-    DataArguments,
     TrainingArguments,
 )
+import joynav.dataset
+from joynav.utils.registry import parse_component_args, get_component
 from transformers import AutoProcessor, Trainer
 
 local_rank = None
@@ -54,16 +54,11 @@ def rank0_print(*args):
 
 def make_supervised_data_module(processor, data_args) -> Dict:
     """Make dataset and collator for supervised fine-tuning."""
-    if data_args.video_folder:
-        train_dataset = VLNActionDataset(processor, data_args=data_args)
-    else:
-        train_dataset = LazySupervisedDataset(processor, data_args=data_args)
-    if data_args.data_flatten or data_args.data_packing:
-        data_collator = FlattenedDataCollatorForSupervisedDataset(processor.tokenizer)
-        return dict(
-            train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
-        )
-    data_collator = DataCollatorForSupervisedDataset(processor.tokenizer)
+    
+    data_class = get_component('dataset', data_args.dataset_type)
+    train_dataset = data_class(processor, data_args=data_args)
+    data_collator = data_class.create_collator(processor.tokenizer)
+
     return dict(
         train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
     )
@@ -113,10 +108,9 @@ def set_model(model_args, model):
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments)
+    model_args, training_args, data_args = parse_component_args(
+        additional_args_classes=(ModelArguments, TrainingArguments,), component_types=['dataset']
     )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
@@ -179,6 +173,7 @@ def train(attn_implementation="flash_attention_2"):
         model.model.print_trainable_parameters()
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
+
     trainer = Trainer(
         model=model, processing_class=tokenizer, args=training_args, **data_module
     )
