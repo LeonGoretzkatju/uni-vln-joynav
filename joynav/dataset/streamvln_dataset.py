@@ -10,17 +10,17 @@ from typing import Dict, Optional, Sequence, List, Tuple, Any
 from .lazy_supervised_dataset import LazySupervisedDataset, preprocess_qwen_visual, rank0_print, DEFAULT_IMAGE_TOKEN
 
 from .base_dataset_args import BaseDatasetArguments
-from .vln_action_dataset_args import VLNActionDatasetArguments
+from .streamvln_dataset_args import StreamVLNDatasetArguments
 
 
-class VLNActionDataset(LazySupervisedDataset):
+class StreamVLNDataset(LazySupervisedDataset):
     """
     Dataset for Vision-Language Navigation with Action Prediction.
     Inherits from LazySupervisedDataset and provides VLN-specific functionality.
     """
 
     # Specify the corresponding collator class
-    ARGUMENT_CLASS = VLNActionDatasetArguments
+    ARGUMENT_CLASS = StreamVLNDatasetArguments
 
     def __init__(self, processor, data_args: BaseDatasetArguments):
         """
@@ -31,9 +31,9 @@ class VLNActionDataset(LazySupervisedDataset):
             data_args: VLN-specific dataset arguments
         """
         # Validate args type
-        if not isinstance(data_args, VLNActionDatasetArguments):
+        if not isinstance(data_args, StreamVLNDatasetArguments):
             raise TypeError(
-                f"data_args must be VLNActionDatasetArguments, got {type(data_args)}"
+                f"data_args must be StreamVLNDatasetArguments, got {type(data_args)}"
             )
         
         # VLN-specific attributes (set before calling super().__init__)

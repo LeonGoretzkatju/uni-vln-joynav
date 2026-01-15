@@ -8,7 +8,7 @@ from .lazy_supervised_dataset_args import LazySupervisedDatasetArguments
 
 
 @dataclass
-class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
+class StreamVLNDatasetArguments(LazySupervisedDatasetArguments):
     """Arguments specific to VLN Action Dataset."""
 
     # VLN-specific data paths
