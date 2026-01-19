@@ -127,6 +127,10 @@ def train(attn_implementation="flash_attention_2"):
     print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        use_fast=False,
     )
 
     if data_args.data_flatten or data_args.data_packing:
@@ -142,24 +146,25 @@ def train(attn_implementation="flash_attention_2"):
                 output.requires_grad_(True)
 
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    
+    data_module = make_supervised_data_module(processor, data_args=data_args)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=False,
-    )
+    # Resize model embeddings if tokenizer vocabulary has been extended
+    model_vocab_size = model.get_input_embeddings().weight.shape[0]
+    tokenizer_vocab_size = len(processor.tokenizer)
+    
+    if tokenizer_vocab_size > model_vocab_size:
+        rank0_print(f"Resizing model embeddings from {model_vocab_size} to {tokenizer_vocab_size}")
+        model.resize_token_embeddings(tokenizer_vocab_size)
+
     set_model(model_args, model)
 
     if torch.distributed.get_rank() == 0:
         model.visual.print_trainable_parameters()
         model.model.print_trainable_parameters()
     
-    data_module = make_supervised_data_module(processor, data_args=data_args)
-
     trainer = Trainer(
-        model=model, processing_class=tokenizer, args=training_args, **data_module
+        model=model, processing_class=processor, args=training_args, **data_module
     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
