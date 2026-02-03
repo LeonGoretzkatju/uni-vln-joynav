@@ -253,7 +253,7 @@ class DiscreteVLNDataset(LazySupervisedDataset):
             im_end_pos = (input_ids == im_end_idx).nonzero(as_tuple=True)[0][0]
             select_mask = torch.zeros_like(input_ids, dtype=torch.bool)
             select_mask[:im_end_pos + 1] = 1
-            data_dict['select_masks'] = select_mask
+            data_dict['select_mask'] = select_mask
         
         return data_dict
 
@@ -265,7 +265,7 @@ class DiscreteVLNCollator(DataCollatorForSupervisedDataset):
         continuous_actions, select_masks = None, None
         if "continuous_actions" in instances[0]:
             continuous_actions = [instance.pop("continuous_actions") for instance in instances]
-            select_masks = [instance.pop("select_masks") for instance in instances]
+            select_masks = [instance.pop("select_mask") for instance in instances]
 
             # Get max sequence length for padding select_masks
             max_len = max(mask.shape[0] for mask in select_masks)
@@ -284,7 +284,7 @@ class DiscreteVLNCollator(DataCollatorForSupervisedDataset):
         
         batch = super().__call__(instances)
         if continuous_actions is not None:
-            batch.update(dict(continuous_actions=batch_continuous_actions, select_masks=batch_select_masks))
+            batch.update(dict(continuous_actions=batch_continuous_actions, select_mask=batch_select_masks))
         return batch
 
 

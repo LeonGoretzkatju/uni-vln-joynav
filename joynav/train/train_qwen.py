@@ -116,6 +116,7 @@ def train(attn_implementation="flash_attention_2"):
         attn_implementation=attn_implementation,
         dtype=(torch.bfloat16 if training_args.bf16 else None),
     )
+    model.post_update_model()
 
     if "qwen3_vl" in data_args.model_type:
         data_args.model_type = "qwen3vl"

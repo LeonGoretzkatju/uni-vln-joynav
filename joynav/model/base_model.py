@@ -32,3 +32,10 @@ class BaseModel(ABC):
         """
         return self.ARGUMENT_CLASS
     
+    @classmethod
+    def post_update_model(self):
+        """
+        Hook for additional model updates after initialization.
+        Can be overridden by subclasses.
+        """
+        pass
