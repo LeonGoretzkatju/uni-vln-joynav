@@ -53,7 +53,7 @@ class ActionLatent_Config(PretrainedConfig):
 
         # Inference
         action_horizon: int = 8,
-        num_inference_timesteps: int = 1,
+        num_inference_timesteps: int = 4,
         **kwargs,
     ):
         # Perceiver time embedding parameters

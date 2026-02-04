@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import math
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
@@ -34,6 +35,119 @@ from joynav.utils.dist import *
 from joynav.eval.base_evaluator import BaseEvaluator
 
 DEFAULT_IMAGE_TOKEN = "<image>"
+
+
+def normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi] range."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
+def continuous_to_discrete_actions(
+    trajectory: torch.Tensor,
+    x_scale: float = 1.0,
+    y_scale: float = 0.433,
+    forward_step: float = 0.125,
+    turn_angle_deg: float = 15.0,
+    stop_threshold: float = 0.5,
+    max_actions: int = 500,
+    smooth_trajectory: bool = True,
+) -> List[List[int]]:
+    """
+    Alternative implementation that treats trajectory points as absolute positions
+    relative to the starting point, not relative to the previous point.
+    
+    This version accumulates positions and converts the full path to actions.
+    
+    Args:
+        trajectory: torch.Tensor of shape [batch_size, num_points, 5]
+        x_scale: Scale factor for x normalization
+        y_scale: Scale factor for y normalization  
+        forward_step: Distance moved per FORWARD action
+        turn_angle_deg: Degrees turned per LEFT/RIGHT action
+        stop_threshold: Threshold for stop flag
+        max_actions: Maximum number of actions
+        smooth_trajectory: Whether to smooth the trajectory before conversion
+    
+    Returns:
+        List of action lists for each batch item.
+    """
+    if trajectory.dim() == 2:
+        trajectory = trajectory.unsqueeze(0)
+    
+    batch_size, num_points, feat_dim = trajectory.shape
+    assert feat_dim == 5, f"Expected 5 features per point, got {feat_dim}"
+    
+    turn_angle_rad = math.radians(turn_angle_deg)
+    all_actions = []
+    
+    for b in range(batch_size):
+        actions = []
+        
+        # Current agent state
+        agent_x, agent_y = 0.0, 0.0
+        agent_yaw = 0.0
+        
+        for p in range(num_points):
+            if len(actions) >= max_actions:
+                break
+            
+            # Target position (denormalized, relative to start)
+            target_x = trajectory[b, p, 0].item() * x_scale
+            target_y = trajectory[b, p, 1].item() * y_scale
+            target_cos = trajectory[b, p, 2].item()
+            target_sin = trajectory[b, p, 3].item()
+            stop_flag = trajectory[b, p, 4].item()
+            
+            # Calculate displacement from current agent position
+            dx = target_x - agent_x
+            dy = target_y - agent_y
+            distance = math.sqrt(dx ** 2 + dy ** 2)
+            
+            if distance > forward_step * 0.1:
+                # Angle to target from current position
+                angle_to_target = math.atan2(dy, dx)
+                angle_diff = normalize_angle(angle_to_target - agent_yaw)
+                
+                # Turn to face target
+                turn_steps = round(angle_diff / turn_angle_rad)
+                if turn_steps > 0:
+                    actions.extend([2] * min(turn_steps, max_actions - len(actions)))
+                elif turn_steps < 0:
+                    actions.extend([3] * min(abs(turn_steps), max_actions - len(actions)))
+                
+                agent_yaw = normalize_angle(agent_yaw + turn_steps * turn_angle_rad)
+                
+                # Move forward
+                forward_steps = round(distance / forward_step)
+                actions.extend([1] * min(forward_steps, max_actions - len(actions)))
+                
+                # Update agent position
+                agent_x += forward_steps * forward_step * math.cos(agent_yaw)
+                agent_y += forward_steps * forward_step * math.sin(agent_yaw)
+            
+            # Adjust to target orientation
+            target_yaw = math.atan2(target_sin, target_cos)
+            final_diff = normalize_angle(target_yaw - agent_yaw)
+            final_turn = round(final_diff / turn_angle_rad)
+            
+            if final_turn > 0:
+                actions.extend([2] * min(final_turn, max_actions - len(actions)))
+            elif final_turn < 0:
+                actions.extend([3] * min(abs(final_turn), max_actions - len(actions)))
+            
+            agent_yaw = normalize_angle(agent_yaw + final_turn * turn_angle_rad)
+            
+            if stop_flag > stop_threshold:
+                actions.append(0)
+                break
+        
+        all_actions.append(actions)
+    
+    return all_actions
 
 @dataclass
 class Qwen3VLContEvaluatorArguments:
@@ -65,8 +179,6 @@ class Qwen3VLContEvaluatorArguments:
     min_window_size: int = field(default=8, metadata={"help": "Minimum window size for action generation"})
     max_window_size: int = field(default=16, metadata={"help": "Maximum window size for action generation"})
     temporal_interval: int = field(default=8, metadata={"help": "Temporal interval for action generation"})
-
-    do_smoothing: bool = field(default=True, metadata={"help": "Whether to smooth the pred traj"})
     
     # Distributed training parameters
     local_rank: int = field(default=0, metadata={"help": "Local rank for distributed training"})
@@ -136,82 +248,6 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
 
     return messages
-
-
-def traj_to_actions(dp_actions, use_discrate_action=True):
-    def reconstruct_xy_from_delta(delta_xyt):
-        """
-        Input:
-            delta_xyt: [B, T, 3], dx, dy are position increments in global coordinates, dθ is heading difference (not used for position)
-            start_xy: [B, 2] starting point
-        Output:
-            xy: [B, T+1, 2] reconstructed global trajectory
-        """
-        start_xy = np.zeros((len(delta_xyt), 2))
-        delta_xy = delta_xyt[:, :, :2]  # Take dx, dy parts
-        cumsum_xy = np.cumsum(delta_xy, axis=1)  # [B, T, 2]
-
-        B = delta_xyt.shape[0]
-        T = delta_xyt.shape[1]
-        xy = np.zeros((B, T + 1, 2))
-        xy[:, 0] = start_xy
-        xy[:, 1:] = start_xy[:, None, :] + cumsum_xy
-
-        return xy
-
-    def trajectory_to_discrete_actions_close_to_goal(trajectory, step_size=0.125, turn_angle_deg=15, lookahead=4):
-        actions = []
-        yaw = 0.0
-        pos = trajectory[0]
-        turn_angle_rad = np.deg2rad(turn_angle_deg)
-        traj = trajectory
-        goal = trajectory[-1]
-
-        def normalize_angle(angle):
-            return (angle + np.pi) % (2 * np.pi) - np.pi
-
-        while np.linalg.norm(pos - goal) > 0.2:
-            # Find the nearest trajectory point index to current position
-            dists = np.linalg.norm(traj - pos, axis=1)
-            nearest_idx = np.argmin(dists)
-            # Look ahead a bit (not exceeding trajectory end)
-            target_idx = min(nearest_idx + lookahead, len(traj) - 1)
-            target = traj[target_idx]
-            # Target direction
-            target_dir = target - pos
-            if np.linalg.norm(target_dir) < 1e-6:
-                break
-            target_yaw = np.arctan2(target_dir[1], target_dir[0])
-            # Difference between current yaw and target yaw
-            delta_yaw = normalize_angle(target_yaw - yaw)
-            n_turns = int(round(delta_yaw / turn_angle_rad))
-            if n_turns > 0:
-                actions += [2] * n_turns
-            elif n_turns < 0:
-                actions += [3] * (-n_turns)
-            yaw = normalize_angle(yaw + n_turns * turn_angle_rad)
-
-            # Move forward one step
-            next_pos = pos + step_size * np.array([np.cos(yaw), np.sin(yaw)])
-
-            # If moving forward one step makes us farther from goal, stop
-            if np.linalg.norm(next_pos - goal) > np.linalg.norm(pos - goal):
-                break
-
-            actions.append(1)
-            pos = next_pos
-
-        return actions
-
-    # unnormalize
-    # dp_actions[:, :, :2] /= 4.0
-    all_trajectory = reconstruct_xy_from_delta(dp_actions.float().cpu().numpy())
-    trajectory = np.mean(all_trajectory, axis=0)
-    if use_discrate_action:
-        actions = trajectory_to_discrete_actions_close_to_goal(trajectory)
-        return actions
-    else:
-        return trajectory
     
 
 class Qwen3VLContEvaluator(BaseEvaluator):
@@ -295,7 +331,6 @@ class Qwen3VLContEvaluator(BaseEvaluator):
         self.max_window_size = args.max_window_size
         self.temporal_interval = args.temporal_interval
 
-        self.do_smoothing = args.do_smoothing
 
     def config_env(self) -> Env:
         env = Env(config=self.config)
@@ -413,7 +448,6 @@ class Qwen3VLContEvaluator(BaseEvaluator):
                         frame = observations_to_image({'rgb': np.asarray(save_raw_image)}, info)
                         vis_frames.append(frame)
                     
-                    
 
                     if len(action_seq) == 0:
                         if self.use_cache:
@@ -427,16 +461,13 @@ class Qwen3VLContEvaluator(BaseEvaluator):
 
                         with torch.no_grad():
                             outputs = self.model.predict_action(**inputs)
-                        
 
-                        # import ipdb;ipdb.set_trace()
                         action_seq = self.parse_actions(outputs['action_pred'])
-
 
                         print(f"episode_id-{episode.episode_id} step_id-{step_id} === llm_outputs: {llm_outputs} === action_seq: {action_seq}")
 
-                        if len(action_seq) > self.temporal_interval:  
-                            action_seq = action_seq[:self.temporal_interval]  
+                        if len(action_seq) > self.action_chunk_num:  
+                            action_seq = action_seq[:self.action_chunk_num]  
                         if len(action_seq) == 0: ## if generated llm without Specific values
                             action_seq = [0]
 
@@ -496,40 +527,32 @@ class Qwen3VLContEvaluator(BaseEvaluator):
             torch.tensor(len(sucs)).to(self.device),
         )
 
-    def parse_actions(self, action_pred, turn_angle_deg=15):
-        if self.do_smoothing:
-            target_pose = action_pred[0].sum(dim=0).cpu().float().numpy()
-            actions = traj_to_actions(action_pred)
-
-            def normalize_angle(angle):
-                return (angle + np.pi) % (2 * np.pi) - np.pi
-
-            res = 0
-            turn_angle_rad = np.deg2rad(turn_angle_deg)
-            for action in actions:
-                if action == 2:
-                    res += turn_angle_rad
-                elif action == 3:
-                    res -= turn_angle_rad
-                res = normalize_angle(res)
-            
-            delta_yaw = normalize_angle(target_pose[-1] - res)
-
-            if abs(delta_yaw) > turn_angle_rad:
-                n_turns = int(round(abs(delta_yaw) / turn_angle_rad))
-                for _ in range(n_turns):
-                    actions.append(2 if delta_yaw > 0 else 3)
-        else:
-            atom_actions = torch.tensor([
-                [0, 0, 0],
-                [0.25, 0, 0],
-                [0, 0, np.deg2rad(turn_angle_deg)],
-                [0, 0, np.deg2rad(turn_angle_deg)],
-            ], dtype=torch.float32)
-            distances = (action_pred[0][:, None, :].cpu() - atom_actions).abs().sum(dim=-1)
-            actions = distances.argmin(dim=-1).tolist()
-
-        return actions
+    def parse_actions(self, action_pred: torch.Tensor) -> List[int]:
+        """
+        Convert continuous trajectory prediction to discrete actions.
+        
+        Args:
+            action_pred: torch.Tensor of shape [batch_size, num_points, 5]
+                - [:, :, 0]: x position relative to current (normalized by 1.0)
+                - [:, :, 1]: y position relative to current (normalized by 0.433)
+                - [:, :, 2]: cos(yaw)
+                - [:, :, 3]: sin(yaw)
+                - [:, :, 4]: stop flag (0-1)
+        
+        Returns:
+            List of discrete actions: 0=STOP, 1=FORWARD, 2=LEFT, 3=RIGHT
+        """
+        # Convert continuous trajectory to discrete actions
+        actions_list = continuous_to_discrete_actions(
+            trajectory=action_pred,
+            x_scale=1.0,
+            y_scale=0.433,
+            forward_step=0.125,
+            turn_angle_deg=15.0,
+            stop_threshold=0.5,
+            max_actions=self.action_chunk_num,
+        )
+        return actions_list[0]
 
     def prepare_inputs_no_cache(self, source, output_ids, llm_outputs, step_id, episode, rgb_list):
         history_id = []
