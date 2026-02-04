@@ -21,7 +21,9 @@ from joynav.eval.base_evaluator import BaseEvaluatorArguments
 
 # Register evaluators
 from joynav.eval.habitat_vln_evaluator import StreamVLNEvaluator
+from joynav.eval.qwen3_vl_dit_evaluator import Qwen3VLDiTEvaluator
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
+register_component('evaluator', 'qwen3_vl_dit', Qwen3VLDiTEvaluator)
 
 
 def parse_args():

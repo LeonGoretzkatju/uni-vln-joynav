@@ -152,16 +152,17 @@ class JoyNav_Qwen3VLDiTForCausalLM(Qwen3VLForConditionalGeneration, BaseModel):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
-        backbone_output = BatchFeature(
-            data={"backbone_features": hidden_states.detach(), "backbone_attention_mask": kwargs["select_mask"]}
-        )
-        action_mask = torch.ones_like(kwargs["continuous_actions"], dtype=torch.bool)
-        action_input = BatchFeature(
-            data={"embodiment_id": 0, "action": kwargs["continuous_actions"], "action_mask": action_mask}
-        )
-        dp_output = self.action_latent(backbone_output, action_input)
-        dp_loss = dp_output.loss
-        loss += dp_loss
+        if "select_mask" in kwargs:
+            backbone_output = BatchFeature(
+                data={"backbone_features": hidden_states.detach(), "backbone_attention_mask": kwargs["select_mask"]}
+            )
+            action_mask = torch.ones_like(kwargs["continuous_actions"], dtype=torch.bool)
+            action_input = BatchFeature(
+                    data={"embodiment_id": 0, "action": kwargs["continuous_actions"], "action_mask": action_mask}
+            )
+            dp_output = self.action_latent(backbone_output, action_input)
+            dp_loss = dp_output.loss
+            loss += dp_loss
 
         return Qwen3VLCausalLMOutputWithPast(
             loss=loss,
