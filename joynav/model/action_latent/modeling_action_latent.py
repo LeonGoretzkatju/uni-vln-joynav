@@ -52,8 +52,8 @@ class ActionLatent_Config(PretrainedConfig):
         tune_perceiver: bool = True,           # Whether to fine-tune the PerceiverNet
 
         # Inference
-        action_horizon: int = 5,
-        num_inference_timesteps: int = 4,
+        action_horizon: int = 8,
+        num_inference_timesteps: int = 1,
         **kwargs,
     ):
         # Perceiver time embedding parameters
