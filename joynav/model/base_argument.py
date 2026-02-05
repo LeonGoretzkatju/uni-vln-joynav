@@ -12,3 +12,4 @@ class BaseArguments:
     tune_mm_mlp: bool = field(default=False, metadata={"help": "Whether to fine-tune the multi-modal MLP"})
     tune_mm_vision: bool = field(default=False, metadata={"help": "Whether to fine-tune the multi-modal vision encoder"})
 
+    reinit_token_embeddings: bool = field(default=False, metadata={"help": "Whether to re-init added special token embeddings"})
