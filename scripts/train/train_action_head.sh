@@ -51,7 +51,7 @@ cp "$script_path" "$output_dir"
 # Training arguments
 args="
     --deepspeed ${deepspeed} \
-    --dataset_type "discrete_vln" \
+    --dataset_type "vln_action" \
     --model_type "qwen3_vl_action" \
     --model_name_or_path "${llm}" \
     --video_folder ${datasets} \

@@ -26,7 +26,7 @@ from .lazy_supervised_dataset import (
 )
 
 from .base_dataset_args import BaseDatasetArguments
-from .discrete_vln_dataset_args import VLNActionDatasetArguments
+from .vln_action_dataset_args import VLNActionDatasetArguments
 
 
 class VLNActionDataset(LazySupervisedDataset):
@@ -66,7 +66,7 @@ class VLNActionDataset(LazySupervisedDataset):
         # Add Special Action Token
         self.action_token = "<|action|>"
         special_tokens_dict = {'additional_special_tokens': [self.action_token]}
-        num_new_tokens = self.processor.tokenizer.add_special_tokens(special_tokens_dict)
+        num_new_tokens = processor.tokenizer.add_special_tokens(special_tokens_dict)
         rank0_print(f"Adding {num_new_tokens} new tokens: {special_tokens_dict}")
 
         super().__init__(processor, data_args)

@@ -265,10 +265,13 @@ class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration
 
             action_loss_fct = nn.MSELoss()
             action_loss = action_loss_fct(pred_actions, gt_actions.to(pred_actions.dtype))
-            dp_loss = action_loss
-            loss += dp_loss * self.model_args.action_head_loss_weight
 
-        return Qwen3VLCausalLMOutputWithPast(
+            loss += action_loss * self.model_args.action_head_loss_weight
+
+        else:
+            action_loss = None
+
+        final_outputs = Qwen3VLCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
@@ -276,6 +279,10 @@ class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration
             attentions=outputs.attentions,
             rope_deltas=outputs.rope_deltas,
         )
+        
+        final_outputs.action_loss = action_loss.detach() if action_loss is not None else None
+
+        return final_outputs
 
 
     def predict_action(
