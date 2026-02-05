@@ -115,6 +115,7 @@ def train(attn_implementation="flash_attention_2"):
         cache_dir=training_args.cache_dir,
         attn_implementation=attn_implementation,
         dtype=(torch.bfloat16 if training_args.bf16 else None),
+        model_args=model_args
     )
     model.post_update_model()
 

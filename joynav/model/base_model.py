@@ -39,3 +39,10 @@ class BaseModel(ABC):
         Can be overridden by subclasses.
         """
         pass
+
+    @classmethod
+    def from_pretrained(self, pretrained_model_name_or_path: Optional[str] = None, **kwargs):
+        model_args = kwargs.pop("model_args", None)
+        model = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        setattr(model, "model_args", model_args)
+        return model

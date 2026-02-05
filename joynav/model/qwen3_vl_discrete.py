@@ -27,7 +27,7 @@ class JoyNavModel(Qwen3VLModel):
     def __init__(self, config: Qwen3VLConfig):
         super(JoyNavModel, self).__init__(config)
 
-class JoyNav_Qwen3VLForCausalLM(Qwen3VLForConditionalGeneration, BaseModel):
+class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
     config_class = JoyNavModelConfig
 
     def __init__(self, config):

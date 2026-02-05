@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 import os 
 import torch
@@ -16,6 +17,7 @@ from transformers import PreTrainedModel, GenerationMixin
 from .action_latent.modeling_action_latent import ActionLatent_Config, ActionLatent
 from transformers.feature_extraction_utils import BatchFeature
 from .base_model import BaseModel
+from .base_argument import BaseArguments
 
         
 class JoyNavModelConfig(Qwen3VLConfig):
@@ -43,8 +45,16 @@ class JoyNavModelConfig(Qwen3VLConfig):
         return vln_config
 
 
-class JoyNav_Qwen3VLDiTForCausalLM(Qwen3VLForConditionalGeneration, BaseModel):
+@dataclass
+class JoyNav_Qwen3VLDiTForCauslaLMArgruments(BaseArguments):
+
+    propagate_action_head_grad: bool = field(default=True, metadata={"help": "Whether to propagate the gradients from action latent module to backbone LLM"})
+    action_head_loss_weight: float = field(default=1.0, metadata={"help": "Weight for action latent loss"})
+
+
+class JoyNav_Qwen3VLDiTForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
     config_class = JoyNavModelConfig
+    ARGUMENT_CLASS = JoyNav_Qwen3VLDiTForCauslaLMArgruments
 
     def __init__(self, config):
         Qwen3VLForConditionalGeneration.__init__(self, config)
@@ -153,8 +163,10 @@ class JoyNav_Qwen3VLDiTForCausalLM(Qwen3VLForConditionalGeneration, BaseModel):
             loss = loss_fct(shift_logits, shift_labels)
 
         if "select_mask" in kwargs:
+            if not self.model_args.propagate_action_head_grad:
+                hidden_states = hidden_states.detach()
             backbone_output = BatchFeature(
-                data={"backbone_features": hidden_states.detach(), "backbone_attention_mask": kwargs["select_mask"]}
+                data={"backbone_features": hidden_states, "backbone_attention_mask": kwargs["select_mask"]}
             )
             action_mask = torch.ones_like(kwargs["continuous_actions"], dtype=torch.bool)
             action_input = BatchFeature(
@@ -162,7 +174,7 @@ class JoyNav_Qwen3VLDiTForCausalLM(Qwen3VLForConditionalGeneration, BaseModel):
             )
             dp_output = self.action_latent(backbone_output, action_input)
             dp_loss = dp_output.loss
-            loss += dp_loss
+            loss += dp_loss * self.model_args.action_head_loss_weight
 
         return Qwen3VLCausalLMOutputWithPast(
             loss=loss,

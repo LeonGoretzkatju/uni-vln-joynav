@@ -27,7 +27,7 @@ class JoyNavModel(Qwen2_5_VLModel):
     def __init__(self, config: Qwen2_5_VLConfig):
         super(JoyNavModel, self).__init__(config)
 
-class JoyNav_Qwen2_5_VLForCausalLM(Qwen2_5_VLForConditionalGeneration, BaseModel):
+class JoyNav_Qwen2_5_VLForCausalLM(BaseModel, Qwen2_5_VLForConditionalGeneration):
     config_class = JoyNavModelConfig
 
     def __init__(self, config):
