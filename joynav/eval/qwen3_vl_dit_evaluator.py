@@ -35,19 +35,18 @@ from joynav.eval.base_evaluator import BaseEvaluator
 
 DEFAULT_IMAGE_TOKEN = "<image>"
 
-
 @dataclass
-class StreamVLNEvaluatorArguments:
+class Qwen3VLDiTEvaluatorArguments:
     """Arguments for VLN Evaluator - includes all parameters."""
     # Evaluator selection
     evaluator_type: str = field(default="vln", metadata={"help": "Type of evaluator: vln, etc."})
     
     # Model selection and loading
-    model_type: str = field(default="qwen3_vl_discrete", metadata={"help": "Model type: qwen2_5_vl_discrete, qwen3_vl_discrete, qwen3_vl_dit"})
+    model_type: str = field(default="qwen3_vl_dit", metadata={"help": "Model type: qwen2_5_vl_discrete, qwen3_vl_discrete, qwen3_vl_dit"})
     model_path: str = field(default="", metadata={"help": "Path to pretrained model"})
     
     # Habitat configuration
-    habitat_config_path: str = field(default='configs/vln_r2r.yaml', metadata={"help": "Path to Habitat config file"})
+    habitat_config_path: str = field(default='configs/vln_r2r_cfg2.yaml', metadata={"help": "Path to Habitat config file"})
     eval_split: str = field(default='val_unseen', metadata={"help": "Evaluation split: val_seen, val_unseen, test"})
     output_path: str = field(default='./results/r2r/val_unseen', metadata={"help": "Output path for evaluation results"})
     
@@ -57,11 +56,15 @@ class StreamVLNEvaluatorArguments:
     max_new_tokens: int = field(default=128, metadata={"help": "Maximum number of new tokens to generate"})
     
     # Evaluation parameters
-    num_future_steps: int = field(default=4, metadata={"help": "Number of future steps to predict"})
-    num_frames: int = field(default=32, metadata={"help": "Number of frames for model input"})
     save_video: bool = field(default=False, metadata={"help": "Whether to save video of trajectories"})
-    num_history: int = field(default=8, metadata={"help": "Number of history frames to keep"})
     use_cache: bool = field(default=False, metadata={"help": "Whether to use KV cache during generation"})
+    limit: int = field(default=-1, metadata={"help": "Limit number of evaluation episodes (0 for no limit)"})
+
+    predict_type: str = field(default="discrtete", metadata={"help": "Type of prediction: discrete"})
+    action_chunk_num: int = field(default=8, metadata={"help": "Number of actions to generate per chunk"})
+    min_window_size: int = field(default=8, metadata={"help": "Minimum window size for action generation"})
+    max_window_size: int = field(default=16, metadata={"help": "Maximum window size for action generation"})
+    temporal_interval: int = field(default=8, metadata={"help": "Temporal interval for action generation"})
     
     # Distributed training parameters
     local_rank: int = field(default=0, metadata={"help": "Local rank for distributed training"})
@@ -133,10 +136,10 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     return messages
 
 
-class StreamVLNEvaluator(BaseEvaluator):
+class Qwen3VLDiTEvaluator(BaseEvaluator):
     """VLN evaluator for discrete actions."""
     
-    ARGUMENT_CLASS = StreamVLNEvaluatorArguments
+    ARGUMENT_CLASS = Qwen3VLDiTEvaluatorArguments
     
     def __init__(
         self,
@@ -208,19 +211,11 @@ class StreamVLNEvaluator(BaseEvaluator):
             "←": [2],
             "→": [3]
         })
-        self.conjunctions = [
-                                'you can see ',
-                                'in front of you is ',
-                                'there is ',
-                                'you can spot ',
-                                'you are toward the ',
-                                'ahead of you is ',
-                                'in your sight is '
-                            ]
 
-        self.num_frames = args.num_frames
-        self.num_future_steps = args.num_future_steps
-        self.num_history = args.num_history
+        self.action_chunk_num = args.action_chunk_num
+        self.min_window_size = args.min_window_size
+        self.max_window_size = args.max_window_size
+        self.temporal_interval = args.temporal_interval
 
     def config_env(self) -> Env:
         env = Env(config=self.config)
@@ -231,7 +226,14 @@ class StreamVLNEvaluator(BaseEvaluator):
         self.model.eval()
         env = self.config_env()
         scene_episode_dict = {}
-        for episode in env.episodes:
+
+        episodes = copy.deepcopy(env.episodes)
+        if self.args.limit > 0:
+            random.seed(42)
+            random.shuffle(episodes)
+            episodes = episodes[:self.args.limit]
+
+        for episode in episodes:
             if episode.scene_id not in scene_episode_dict:
                 scene_episode_dict[episode.scene_id] = []
             scene_episode_dict[episode.scene_id].append(episode)
@@ -355,8 +357,8 @@ class StreamVLNEvaluator(BaseEvaluator):
                         action_seq = self.parse_actions(llm_outputs)
                         print(f"episode_id-{episode.episode_id} step_id-{step_id} === llm_outputs: {llm_outputs} === action_seq: {action_seq}")
 
-                        if len(action_seq) > 4:  
-                            action_seq = action_seq[:4]  
+                        if len(action_seq) > self.temporal_interval:  
+                            action_seq = action_seq[:self.temporal_interval]  
                         if len(action_seq) == 0: ## if generated llm without Specific values
                             action_seq = [0]
 
@@ -365,14 +367,14 @@ class StreamVLNEvaluator(BaseEvaluator):
                     
                     observations = env.step(action)
                     step_id += 1
-                    if step_id % self.num_frames == 0:
-                        output_ids = None
-                        past_key_values = None
-                        llm_outputs = None
-                        source = {
-                            "image": [],
-                            "conversations": [],
-                        }
+                    # if step_id % self.num_frames == 0:
+                    #     output_ids = None
+                    #     past_key_values = None
+                    #     llm_outputs = None
+                    #     source = {
+                    #         "image": [],
+                    #         "conversations": [],
+                    #     }
 
                 process_bar.update(1)
 
@@ -427,31 +429,23 @@ class StreamVLNEvaluator(BaseEvaluator):
 
     def prepare_inputs_no_cache(self, source, output_ids, llm_outputs, step_id, episode, rgb_list):
         history_id = []
-        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-        if llm_outputs is None:  # Equals to step_id % self.num_frames == 0:
-            conversation = copy.deepcopy(self.conversation)
-            conversation[0]["value"] = conversation[0]["value"].replace(
-                '<instruction>.', episode.instruction.instruction_text[:-1]
-            )
-            if step_id != 0:
-                history_id = np.unique(
-                    np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
-                ).tolist()
-                placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
-                conversation[0]["value"] += f' These are your historical observations: {placeholder}.'
-                history_id = sorted(history_id)
-            conversation[0]["value"] += f" {prompt}."
-        else:
-            conversation = [
-                {"from": "gpt", "value": llm_outputs},
-                {"from": "human", "value": f"{prompt}."}
-            ]
+        conversation = copy.deepcopy(self.conversation)
+        conversation[0]["value"] = conversation[0]["value"].replace(
+            '<instruction>.', episode.instruction.instruction_text[:-1]
+        )
+        
+        # iterate from min_window_size+1 to max_window_size
+        image_num = self.min_window_size + 1 + \
+            (step_id // self.temporal_interval)%(self.max_window_size - self.min_window_size)
 
-        cur_images = rgb_list[-1:]
-        input_images = [rgb_list[i] for i in history_id] + cur_images
+        history_ids = list(range(step_id, -1, -self.temporal_interval))[:image_num][::-1]
+        input_images = [rgb_list[i] for i in history_ids]
+        history_str = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_ids)
+        conversation[0]["value"] += history_str
+
         source = {
-            "image": source["image"] + input_images,
-            "conversations": source["conversations"] + conversation,
+            "image": input_images,
+            "conversations": conversation,
         }
         messages = build_messages(source)
 
@@ -461,48 +455,10 @@ class StreamVLNEvaluator(BaseEvaluator):
 
 
     def prepare_inputs_use_cache(self, source, output_ids, llm_outputs, step_id, episode, rgb_list):
-        history_id = []
-        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-        if llm_outputs is None:  # Equals to step_id % self.num_frames == 0:
-            conversation = copy.deepcopy(self.conversation)
-            conversation[0]["value"] = conversation[0]["value"].replace(
-                '<instruction>.', episode.instruction.instruction_text[:-1]
-            )
-            if step_id != 0:
-                history_id = np.unique(
-                    np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
-                ).tolist()
-                placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
-                conversation[0]["value"] += f' These are your historical observations: {placeholder}.'
-                history_id = sorted(history_id)
-            conversation[0]["value"] += f" {prompt}."
-        else:
-            conversation = [
-                {"from": "human", "value": f"{prompt}."}
-            ]
+        
+        raise NotImplementedError("prepare_inputs_use_cache is not implemented yet.")
 
-        cur_images = rgb_list[-1:]
-        input_images = [rgb_list[i] for i in history_id] + cur_images
-        source = {
-            "image": input_images,
-            "conversations": conversation,
-        }
-        messages = build_messages(source)
 
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        if output_ids is not None: # llm_output: ↑↑↑↑
-            # Remove extra system prompt for qwen2_5_vl if llm_outputs is not None
-            text = text.replace("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n", "")
-            text = "\n" + text  # <|im_start|>user\nyou can see...<|im_end|>\n<|im_start|>assistant\n
-        images, videos = process_vision_info(messages)
-        inputs = self.processor(text=text, images=images, videos=videos, return_tensors="pt").to(self.model.device)
-        if output_ids is not None:
-            # full history: <|im_start|>system\n...<|im_start|>assistant\n↑↑↑↑<|im_end|>\n<|im_start|>user\nyou can see...<|im_end|>\n<|im_start|>assistant\n
-            inputs['input_ids'] = torch.cat([output_ids, inputs['input_ids']], dim=1)
-        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
-        print(f"episode_id-{episode.episode_id} step_id-{step_id} === history_id: {history_id} === decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```")
-        return inputs, source
-    
     def decode_input_ids(self, input_ids):
         """
         Replace <|image_pad|><|image_pad|>...<|image_pad|> with <|image_pad|>*N in the decoded string.

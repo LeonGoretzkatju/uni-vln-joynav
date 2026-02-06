@@ -25,25 +25,19 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
-from trainer import replace_qwen2_vl_attention_class
-
 from transformers import (
+    AutoProcessor,
+    Trainer,
     Qwen2VLForConditionalGeneration,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
     Qwen3VLMoeForConditionalGeneration
 )
-from typing import Dict
-from joynav.model.joynav_qwen3_vl import JoyNav_Qwen3VLForCausalLM
-from joynav.model.joynav_qwen2_5_vl import JoyNav_Qwen2_5_VLForCausalLM
-from joynav.dataset.data_processor import LazySupervisedDataset, DataCollatorForSupervisedDataset, FlattenedDataCollatorForSupervisedDataset
-from joynav.dataset.vln_action_dataset import VLNActionDataset
-from joynav.train.argument import (
-    ModelArguments,
-    DataArguments,
-    TrainingArguments,
-)
-from transformers import AutoProcessor, Trainer
+import joynav.model
+import joynav.dataset
+from joynav.utils.registry import get_component, parse_component_args
+from joynav.train.argument import TrainingArguments
+from trainer import replace_qwen2_vl_attention_class
 
 local_rank = None
 
@@ -52,18 +46,13 @@ def rank0_print(*args):
     if local_rank == 0:
         print(*args)
 
-def make_supervised_data_module(processor, data_args) -> Dict:
+def make_supervised_data_module(processor, data_args) -> dict:
     """Make dataset and collator for supervised fine-tuning."""
-    if data_args.video_folder:
-        train_dataset = VLNActionDataset(processor, data_args=data_args)
-    else:
-        train_dataset = LazySupervisedDataset(processor, data_args=data_args)
-    if data_args.data_flatten or data_args.data_packing:
-        data_collator = FlattenedDataCollatorForSupervisedDataset(processor.tokenizer)
-        return dict(
-            train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
-        )
-    data_collator = DataCollatorForSupervisedDataset(processor.tokenizer)
+    
+    data_class = get_component('dataset', data_args.dataset_type)
+    train_dataset = data_class(processor, data_args=data_args)
+    data_collator = data_class.create_collator(processor.tokenizer)
+
     return dict(
         train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
     )
@@ -113,42 +102,37 @@ def set_model(model_args, model):
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments)
+    training_args, data_args, model_args = parse_component_args(
+        additional_args_classes=(TrainingArguments,), component_types=['dataset', 'model']
     )
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
-    if "qwen3" in model_args.model_name_or_path.lower():
-        model = JoyNav_Qwen3VLForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
+    model_class = get_component('model', data_args.model_type)
+    model = model_class.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        attn_implementation=attn_implementation,
+        dtype=(torch.bfloat16 if training_args.bf16 else None),
+        model_args=model_args
+    )
+    model.post_update_model()
+
+    if "qwen3_vl" in data_args.model_type:
         data_args.model_type = "qwen3vl"
-    elif "qwen2.5" in model_args.model_name_or_path.lower():
-        model = JoyNav_Qwen2_5_VLForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
+    elif "qwen2_5_vl" in data_args.model_type:
         data_args.model_type = "qwen2.5vl"
     else:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            attn_implementation=attn_implementation,
-            dtype=(torch.bfloat16 if training_args.bf16 else None),
-        )
         data_args.model_type = "qwen2vl"
 
     print(f'the initlized model is {model_args.model_name_or_path} the class is {model.__class__.__name__}')
     processor = AutoProcessor.from_pretrained(
         model_args.model_name_or_path,
+        cache_dir=training_args.cache_dir,
+        model_max_length=training_args.model_max_length,
+        padding_side="right",
+        use_fast=False,
     )
 
     if data_args.data_flatten or data_args.data_packing:
@@ -164,23 +148,25 @@ def train(attn_implementation="flash_attention_2"):
                 output.requires_grad_(True)
 
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    
+    data_module = make_supervised_data_module(processor, data_args=data_args)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=False,
-    )
+    # Resize model embeddings if tokenizer vocabulary has been extended
+    model_vocab_size = model.get_input_embeddings().weight.shape[0]
+    tokenizer_vocab_size = len(processor.tokenizer)
+    
+    if tokenizer_vocab_size > model_vocab_size:
+        rank0_print(f"Resizing model embeddings from {model_vocab_size} to {tokenizer_vocab_size}")
+        model.resize_token_embeddings(tokenizer_vocab_size)
+
     set_model(model_args, model)
 
     if torch.distributed.get_rank() == 0:
         model.visual.print_trainable_parameters()
         model.model.print_trainable_parameters()
     
-    data_module = make_supervised_data_module(processor, data_args=data_args)
     trainer = Trainer(
-        model=model, processing_class=tokenizer, args=training_args, **data_module
+        model=model, processing_class=processor, args=training_args, **data_module
     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):

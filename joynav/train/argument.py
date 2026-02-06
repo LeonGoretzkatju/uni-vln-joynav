@@ -4,35 +4,6 @@ from typing import Dict, Optional, Sequence, List
 
 
 @dataclass
-class ModelArguments:
-    model_name_or_path: Optional[str] = field(default="Qwen/Qwen2.5-VL-3B-Instruct")
-    tune_mm_llm: bool = field(default=False)
-    tune_mm_mlp: bool = field(default=False)
-    tune_mm_vision: bool = field(default=False)
-
-@dataclass
-class DataArguments:
-    dataset_use: str = field(default="")
-    data_flatten: bool = field(default=False)
-    data_packing: bool = field(default=False)
-    base_interval: int = field(default=2)
-    max_pixels: int = field(default=28 * 28 * 576)
-    min_pixels: int = field(default=28 * 28 * 16)
-    video_max_frames: Optional[int] = field(default=8)
-    video_min_frames: Optional[int] = field(default=4)
-    video_max_pixels: int = field(default=1024 * 28 * 28)
-    video_min_pixels: int = field(default=256 * 28 * 28)
-    video_fps: float = 2
-
-    dataset_seed: int = field(default=42)
-    video_folder: str = field(default="")
-    num_future_steps: Optional[int] = field(default=4)
-    num_frames: Optional[int] = field(default=32)
-    num_history: Optional[int] = field(default=8)
-    remove_init_turns: Optional[bool] = field(default=False)
-
-
-@dataclass
 class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
     optim: str = field(default="adamw_torch")

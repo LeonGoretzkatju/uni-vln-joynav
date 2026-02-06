@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import math
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
@@ -36,18 +37,130 @@ from joynav.eval.base_evaluator import BaseEvaluator
 DEFAULT_IMAGE_TOKEN = "<image>"
 
 
+def normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi] range."""
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
+    return angle
+
+
+def continuous_to_discrete_actions(
+    trajectory: torch.Tensor,
+    x_scale: float = 1.0,
+    y_scale: float = 0.433,
+    forward_step: float = 0.125,
+    turn_angle_deg: float = 15.0,
+    stop_threshold: float = 0.5,
+    max_actions: int = 500,
+    smooth_trajectory: bool = True,
+) -> List[List[int]]:
+    """
+    Alternative implementation that treats trajectory points as absolute positions
+    relative to the starting point, not relative to the previous point.
+    
+    This version accumulates positions and converts the full path to actions.
+    
+    Args:
+        trajectory: torch.Tensor of shape [batch_size, num_points, 5]
+        x_scale: Scale factor for x normalization
+        y_scale: Scale factor for y normalization  
+        forward_step: Distance moved per FORWARD action
+        turn_angle_deg: Degrees turned per LEFT/RIGHT action
+        stop_threshold: Threshold for stop flag
+        max_actions: Maximum number of actions
+        smooth_trajectory: Whether to smooth the trajectory before conversion
+    
+    Returns:
+        List of action lists for each batch item.
+    """
+    if trajectory.dim() == 2:
+        trajectory = trajectory.unsqueeze(0)
+    
+    batch_size, num_points, feat_dim = trajectory.shape
+    assert feat_dim == 5, f"Expected 5 features per point, got {feat_dim}"
+    
+    turn_angle_rad = math.radians(turn_angle_deg)
+    all_actions = []
+    
+    for b in range(batch_size):
+        actions = []
+        
+        # Current agent state
+        agent_x, agent_y = 0.0, 0.0
+        agent_yaw = 0.0
+        
+        for p in range(num_points):
+            if len(actions) >= max_actions:
+                break
+            
+            # Target position (denormalized, relative to start)
+            target_x = trajectory[b, p, 0].item() * x_scale
+            target_y = trajectory[b, p, 1].item() * y_scale
+            target_cos = trajectory[b, p, 2].item()
+            target_sin = trajectory[b, p, 3].item()
+            stop_flag = trajectory[b, p, 4].item()
+            
+            # Calculate displacement from current agent position
+            dx = target_x - agent_x
+            dy = target_y - agent_y
+            distance = math.sqrt(dx ** 2 + dy ** 2)
+            
+            if distance > forward_step * 0.1:
+                # Angle to target from current position
+                angle_to_target = math.atan2(dy, dx)
+                angle_diff = normalize_angle(angle_to_target - agent_yaw)
+                
+                # Turn to face target
+                turn_steps = round(angle_diff / turn_angle_rad)
+                if turn_steps > 0:
+                    actions.extend([2] * min(turn_steps, max_actions - len(actions)))
+                elif turn_steps < 0:
+                    actions.extend([3] * min(abs(turn_steps), max_actions - len(actions)))
+                
+                agent_yaw = normalize_angle(agent_yaw + turn_steps * turn_angle_rad)
+                
+                # Move forward
+                forward_steps = round(distance / forward_step)
+                actions.extend([1] * min(forward_steps, max_actions - len(actions)))
+                
+                # Update agent position
+                agent_x += forward_steps * forward_step * math.cos(agent_yaw)
+                agent_y += forward_steps * forward_step * math.sin(agent_yaw)
+            
+            # Adjust to target orientation
+            target_yaw = math.atan2(target_sin, target_cos)
+            final_diff = normalize_angle(target_yaw - agent_yaw)
+            final_turn = round(final_diff / turn_angle_rad)
+            
+            if final_turn > 0:
+                actions.extend([2] * min(final_turn, max_actions - len(actions)))
+            elif final_turn < 0:
+                actions.extend([3] * min(abs(final_turn), max_actions - len(actions)))
+            
+            agent_yaw = normalize_angle(agent_yaw + final_turn * turn_angle_rad)
+            
+            if stop_flag > stop_threshold:
+                actions.append(0)
+                break
+        
+        all_actions.append(actions)
+    
+    return all_actions
+
 @dataclass
-class StreamVLNEvaluatorArguments:
+class Qwen3VLContEvaluatorArguments:
     """Arguments for VLN Evaluator - includes all parameters."""
     # Evaluator selection
     evaluator_type: str = field(default="vln", metadata={"help": "Type of evaluator: vln, etc."})
     
     # Model selection and loading
-    model_type: str = field(default="qwen3_vl_discrete", metadata={"help": "Model type: qwen2_5_vl_discrete, qwen3_vl_discrete, qwen3_vl_dit"})
+    model_type: str = field(default="qwen3_vl_dit", metadata={"help": "Model type: qwen2_5_vl_discrete, qwen3_vl_discrete, qwen3_vl_dit"})
     model_path: str = field(default="", metadata={"help": "Path to pretrained model"})
     
     # Habitat configuration
-    habitat_config_path: str = field(default='configs/vln_r2r.yaml', metadata={"help": "Path to Habitat config file"})
+    habitat_config_path: str = field(default='configs/vln_r2r_cfg2.yaml', metadata={"help": "Path to Habitat config file"})
     eval_split: str = field(default='val_unseen', metadata={"help": "Evaluation split: val_seen, val_unseen, test"})
     output_path: str = field(default='./results/r2r/val_unseen', metadata={"help": "Output path for evaluation results"})
     
@@ -57,11 +170,15 @@ class StreamVLNEvaluatorArguments:
     max_new_tokens: int = field(default=128, metadata={"help": "Maximum number of new tokens to generate"})
     
     # Evaluation parameters
-    num_future_steps: int = field(default=4, metadata={"help": "Number of future steps to predict"})
-    num_frames: int = field(default=32, metadata={"help": "Number of frames for model input"})
     save_video: bool = field(default=False, metadata={"help": "Whether to save video of trajectories"})
-    num_history: int = field(default=8, metadata={"help": "Number of history frames to keep"})
     use_cache: bool = field(default=False, metadata={"help": "Whether to use KV cache during generation"})
+    limit: int = field(default=-1, metadata={"help": "Limit number of evaluation episodes (0 for no limit)"})
+
+    predict_type: str = field(default="discrtete", metadata={"help": "Type of prediction: discrete"})
+    action_chunk_num: int = field(default=8, metadata={"help": "Number of actions to generate per chunk"})
+    min_window_size: int = field(default=8, metadata={"help": "Minimum window size for action generation"})
+    max_window_size: int = field(default=16, metadata={"help": "Maximum window size for action generation"})
+    temporal_interval: int = field(default=8, metadata={"help": "Temporal interval for action generation"})
     
     # Distributed training parameters
     local_rank: int = field(default=0, metadata={"help": "Local rank for distributed training"})
@@ -131,12 +248,12 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
         )
 
     return messages
+    
 
-
-class StreamVLNEvaluator(BaseEvaluator):
+class Qwen3VLContEvaluator(BaseEvaluator):
     """VLN evaluator for discrete actions."""
     
-    ARGUMENT_CLASS = StreamVLNEvaluatorArguments
+    ARGUMENT_CLASS = Qwen3VLContEvaluatorArguments
     
     def __init__(
         self,
@@ -208,30 +325,49 @@ class StreamVLNEvaluator(BaseEvaluator):
             "←": [2],
             "→": [3]
         })
-        self.conjunctions = [
-                                'you can see ',
-                                'in front of you is ',
-                                'there is ',
-                                'you can spot ',
-                                'you are toward the ',
-                                'ahead of you is ',
-                                'in your sight is '
-                            ]
 
-        self.num_frames = args.num_frames
-        self.num_future_steps = args.num_future_steps
-        self.num_history = args.num_history
+        self.action_chunk_num = args.action_chunk_num
+        self.min_window_size = args.min_window_size
+        self.max_window_size = args.max_window_size
+        self.temporal_interval = args.temporal_interval
+
 
     def config_env(self) -> Env:
         env = Env(config=self.config)
         # env.episodes = env.episodes[0:1]
         return env
 
+    def process_input_tokens(self, inputs):
+        """
+        prefix: ...<|vision_end|><|im_end|>\n<|im_start|>assistant\n
+        pred:   <|action|>discrete_actions
+        --------
+        inference: input_ids = input_ids + <|action|>
+                                            hidden_states -> action_head -> trajs
+        """
+        action_special_tokens = self.processor.tokenizer.additional_special_tokens # ['<|action|>']
+        action_special_token_ids = self.processor.tokenizer.convert_tokens_to_ids(action_special_tokens)
+        batch_size = inputs["input_ids"].shape[0]
+        action_token_tensor = torch.tensor([action_special_token_ids] * batch_size, device=inputs["input_ids"].device)
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], action_token_tensor], dim=1)
+        if "attention_mask" in inputs:
+            attention_mask = inputs["attention_mask"]
+            ones = torch.ones((batch_size, 1), device=attention_mask.device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([attention_mask, ones], dim=1)
+            inputs["attention_mask"] = attention_mask
+
     def eval_action(self, idx) -> None:  # noqa: C901
         self.model.eval()
         env = self.config_env()
         scene_episode_dict = {}
-        for episode in env.episodes:
+
+        episodes = copy.deepcopy(env.episodes)
+        if self.args.limit > 0:
+            random.seed(42)
+            random.shuffle(episodes)
+            episodes = episodes[:self.args.limit]
+
+        for episode in episodes:
             if episode.scene_id not in scene_episode_dict:
                 scene_episode_dict[episode.scene_id] = []
             scene_episode_dict[episode.scene_id].append(episode)
@@ -330,33 +466,34 @@ class StreamVLNEvaluator(BaseEvaluator):
                     if info['top_down_map'] is not None:
                         frame = observations_to_image({'rgb': np.asarray(save_raw_image)}, info)
                         vis_frames.append(frame)
+                    
 
                     if len(action_seq) == 0:
                         if self.use_cache:
                             inputs, source = self.prepare_inputs_use_cache(source, output_ids, llm_outputs, step_id, episode, rgb_list)
                         else:
                             inputs, source = self.prepare_inputs_no_cache(source, output_ids, llm_outputs, step_id, episode, rgb_list)
-                        
+
+                        if self.args.model_type == "qwen3_vl_action":
+                            self.process_input_tokens(inputs)
+
                         input_len = inputs.input_ids.shape[1]
                         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
                         cache_position = torch.arange(past_seen_tokens, input_len, device=inputs.input_ids.device) if past_key_values is not None else None
 
                         with torch.no_grad():
-                            outputs = self.model.generate(**inputs, max_new_tokens=128, num_beams=1, do_sample=False, use_cache=self.use_cache, return_dict_in_generate=True, past_key_values=past_key_values, cache_position=cache_position)
+                            
+                            if self.args.model_type == "qwen3_vl_action":
+                                outputs = self.model.predict_action(**inputs,past_key_values=past_key_values, cache_position=cache_position)
+                            else:
+                                outputs = self.model.predict_action(**inputs)
 
-                        output_ids = outputs.sequences
-                        past_key_values = outputs.past_key_values
-                        
-                        llm_outputs = self.processor.tokenizer.decode(
-                            output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-                        )
-                        # llm_outputs = self.processor.tokenizer.batch_decode(output_ids, skip_special_tokens=False)[0].strip()
+                        action_seq = self.parse_actions(outputs['action_pred'])
 
-                        action_seq = self.parse_actions(llm_outputs)
                         print(f"episode_id-{episode.episode_id} step_id-{step_id} === llm_outputs: {llm_outputs} === action_seq: {action_seq}")
 
-                        if len(action_seq) > 4:  
-                            action_seq = action_seq[:4]  
+                        if len(action_seq) > self.action_chunk_num:  
+                            action_seq = action_seq[:self.action_chunk_num]  
                         if len(action_seq) == 0: ## if generated llm without Specific values
                             action_seq = [0]
 
@@ -365,14 +502,14 @@ class StreamVLNEvaluator(BaseEvaluator):
                     
                     observations = env.step(action)
                     step_id += 1
-                    if step_id % self.num_frames == 0:
-                        output_ids = None
-                        past_key_values = None
-                        llm_outputs = None
-                        source = {
-                            "image": [],
-                            "conversations": [],
-                        }
+                    # if step_id % self.num_frames == 0:
+                    #     output_ids = None
+                    #     past_key_values = None
+                    #     llm_outputs = None
+                    #     source = {
+                    #         "image": [],
+                    #         "conversations": [],
+                    #     }
 
                 process_bar.update(1)
 
@@ -416,42 +553,52 @@ class StreamVLNEvaluator(BaseEvaluator):
             torch.tensor(len(sucs)).to(self.device),
         )
 
-    def parse_actions(self, output):
-        action_patterns = '|'.join(re.escape(action) for action in self.actions2idx)
-        # import ipdb; ipdb.set_trace()
-        regex = re.compile(action_patterns)
-        matches = regex.findall(output)
-        actions = [self.actions2idx[match] for match in matches]
-        actions = itertools.chain.from_iterable(actions)
-        return list(actions)
+    def parse_actions(self, action_pred: torch.Tensor) -> List[int]:
+        """
+        Convert continuous trajectory prediction to discrete actions.
+        
+        Args:
+            action_pred: torch.Tensor of shape [batch_size, num_points, 5]
+                - [:, :, 0]: x position relative to current (normalized by 1.0)
+                - [:, :, 1]: y position relative to current (normalized by 0.433)
+                - [:, :, 2]: cos(yaw)
+                - [:, :, 3]: sin(yaw)
+                - [:, :, 4]: stop flag (0-1)
+        
+        Returns:
+            List of discrete actions: 0=STOP, 1=FORWARD, 2=LEFT, 3=RIGHT
+        """
+        # Convert continuous trajectory to discrete actions
+        actions_list = continuous_to_discrete_actions(
+            trajectory=action_pred,
+            x_scale=1.0,
+            y_scale=0.433,
+            forward_step=0.125,
+            turn_angle_deg=15.0,
+            stop_threshold=0.5,
+            max_actions=self.action_chunk_num,
+        )
+        return actions_list[0]
 
     def prepare_inputs_no_cache(self, source, output_ids, llm_outputs, step_id, episode, rgb_list):
         history_id = []
-        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-        if llm_outputs is None:  # Equals to step_id % self.num_frames == 0:
-            conversation = copy.deepcopy(self.conversation)
-            conversation[0]["value"] = conversation[0]["value"].replace(
-                '<instruction>.', episode.instruction.instruction_text[:-1]
-            )
-            if step_id != 0:
-                history_id = np.unique(
-                    np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
-                ).tolist()
-                placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
-                conversation[0]["value"] += f' These are your historical observations: {placeholder}.'
-                history_id = sorted(history_id)
-            conversation[0]["value"] += f" {prompt}."
-        else:
-            conversation = [
-                {"from": "gpt", "value": llm_outputs},
-                {"from": "human", "value": f"{prompt}."}
-            ]
+        conversation = copy.deepcopy(self.conversation)
+        conversation[0]["value"] = conversation[0]["value"].replace(
+            '<instruction>.', episode.instruction.instruction_text[:-1]
+        )
+        
+        # iterate from min_window_size+1 to max_window_size
+        image_num = self.min_window_size + 1 + \
+            (step_id // self.temporal_interval)%(self.max_window_size - self.min_window_size)
 
-        cur_images = rgb_list[-1:]
-        input_images = [rgb_list[i] for i in history_id] + cur_images
+        history_ids = list(range(step_id, -1, -self.temporal_interval))[:image_num][::-1]
+        input_images = [rgb_list[i] for i in history_ids]
+        history_str = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_ids)
+        conversation[0]["value"] += history_str
+
         source = {
-            "image": source["image"] + input_images,
-            "conversations": source["conversations"] + conversation,
+            "image": input_images,
+            "conversations": conversation,
         }
         messages = build_messages(source)
 
@@ -461,48 +608,10 @@ class StreamVLNEvaluator(BaseEvaluator):
 
 
     def prepare_inputs_use_cache(self, source, output_ids, llm_outputs, step_id, episode, rgb_list):
-        history_id = []
-        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-        if llm_outputs is None:  # Equals to step_id % self.num_frames == 0:
-            conversation = copy.deepcopy(self.conversation)
-            conversation[0]["value"] = conversation[0]["value"].replace(
-                '<instruction>.', episode.instruction.instruction_text[:-1]
-            )
-            if step_id != 0:
-                history_id = np.unique(
-                    np.linspace(0, step_id - 1, self.num_history, dtype=np.int32)
-                ).tolist()
-                placeholder = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
-                conversation[0]["value"] += f' These are your historical observations: {placeholder}.'
-                history_id = sorted(history_id)
-            conversation[0]["value"] += f" {prompt}."
-        else:
-            conversation = [
-                {"from": "human", "value": f"{prompt}."}
-            ]
+        
+        raise NotImplementedError("prepare_inputs_use_cache is not implemented yet.")
 
-        cur_images = rgb_list[-1:]
-        input_images = [rgb_list[i] for i in history_id] + cur_images
-        source = {
-            "image": input_images,
-            "conversations": conversation,
-        }
-        messages = build_messages(source)
 
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        if output_ids is not None: # llm_output: ↑↑↑↑
-            # Remove extra system prompt for qwen2_5_vl if llm_outputs is not None
-            text = text.replace("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n", "")
-            text = "\n" + text  # <|im_start|>user\nyou can see...<|im_end|>\n<|im_start|>assistant\n
-        images, videos = process_vision_info(messages)
-        inputs = self.processor(text=text, images=images, videos=videos, return_tensors="pt").to(self.model.device)
-        if output_ids is not None:
-            # full history: <|im_start|>system\n...<|im_start|>assistant\n↑↑↑↑<|im_end|>\n<|im_start|>user\nyou can see...<|im_end|>\n<|im_start|>assistant\n
-            inputs['input_ids'] = torch.cat([output_ids, inputs['input_ids']], dim=1)
-        inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
-        print(f"episode_id-{episode.episode_id} step_id-{step_id} === history_id: {history_id} === decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```")
-        return inputs, source
-    
     def decode_input_ids(self, input_ids):
         """
         Replace <|image_pad|><|image_pad|>...<|image_pad|> with <|image_pad|>*N in the decoded string.

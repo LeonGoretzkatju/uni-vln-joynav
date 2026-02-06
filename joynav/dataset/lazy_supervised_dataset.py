@@ -16,8 +16,11 @@ import torch.distributed as dist
 
 import transformers
 
-from . import data_list
-from .rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
+from .utils.qwen3_data_list import data_list
+from .utils.rope2d import get_rope_index_25, get_rope_index_2, get_rope_index_3
+from .base_dataset import BaseDataset
+from .base_dataset_args import BaseDatasetArguments
+from .lazy_supervised_dataset_args import LazySupervisedDatasetArguments
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
@@ -243,282 +246,6 @@ def preprocess_qwen_visual(
     return full_result
 
 
-class LazySupervisedDataset(Dataset):
-    """Dataset for supervised fine-tuning."""
-
-    def __init__(self, processor, data_args):
-        super(LazySupervisedDataset, self).__init__()
-
-        dataset = data_args.dataset_use.split(",")
-        dataset_list = data_list(dataset)
-        rank0_print(f"Loading datasets: {dataset_list}")
-        self.video_max_total_pixels = getattr(
-            data_args, "video_max_total_pixels", 1664 * 28 * 28
-        )
-        self.video_min_total_pixels = getattr(
-            data_args, "video_min_total_pixels", 256 * 28 * 28
-        )
-        self.model_type = data_args.model_type
-        if data_args.model_type == "qwen3vl":
-            self.get_rope_index = get_rope_index_3
-        elif data_args.model_type == "qwen2.5vl":
-            self.get_rope_index = get_rope_index_25
-        elif data_args.model_type == "qwen2vl":
-            self.get_rope_index = get_rope_index_2
-        else:
-            raise ValueError(f"model_type: {data_args.model_type} not supported")
-
-        list_data_dict = []
-
-        for data in dataset_list:
-            file_format = data["annotation_path"].split(".")[-1]
-            if file_format == "jsonl":
-                annotations = read_jsonl(data["annotation_path"])
-            else:
-                annotations = json.load(open(data["annotation_path"], "r"))
-            sampling_rate = data.get("sampling_rate", 1.0)
-            if sampling_rate < 1.0:
-                annotations = random.sample(
-                    annotations, int(len(annotations) * sampling_rate)
-                )
-                rank0_print(f"sampling {len(annotations)} examples from dataset {data}")
-            else:
-                rank0_print(f"dataset name: {data}")
-            for ann in annotations:
-                if isinstance(ann, list):
-                    for sub_ann in ann:
-                        sub_ann["data_path"] = data["data_path"]
-                else:
-                    ann["data_path"] = data["data_path"]
-            list_data_dict += annotations
-
-        rank0_print(f"Total training samples: {len(list_data_dict)}")
-
-        random.shuffle(list_data_dict)  # Randomly shuffle the data for training
-
-        rank0_print("Formatting inputs...Skip in lazy mode")
-        processor = update_processor_pixels(processor, data_args)
-        self.processor = processor
-        self.tokenizer = processor.tokenizer
-        self.data_args = data_args
-        self.merge_size = getattr(processor.image_processor, "merge_size", 2)
-        self.list_data_dict = list_data_dict
-
-        if data_args.data_packing:
-            self.item_fn = self._get_packed_item
-        else:
-            self.item_fn = self._get_item
-
-    def __len__(self):
-        return len(self.list_data_dict)
-
-    @property
-    def lengths(self):
-        length_list = []
-        for sample in self.list_data_dict:
-            img_tokens = 128 if "image" in sample else 0
-            length_list.append(
-                sum(len(conv["value"].split()) for conv in sample["conversations"])
-                + img_tokens
-            )
-        return length_list
-
-    @property
-    def modality_lengths(self):
-        length_list = []
-        for sample in self.list_data_dict:
-            cur_len = sum(
-                len(conv["value"].split()) for conv in sample["conversations"]
-            )
-            cur_len = (
-                cur_len if ("image" in sample) or ("video" in sample) else -cur_len
-            )
-            length_list.append(cur_len)
-        return length_list
-
-    @property
-    def pre_calculated_length(self):
-        if "num_tokens" in self.list_data_dict[0]:
-            length_list = [sample["num_tokens"] for sample in self.list_data_dict]
-            return np.array(length_list)
-        else:
-            print("No pre-calculated length available.")
-            return np.array([1] * len(self.list_data_dict))
-
-    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        num_base_retries = 3
-        num_final_retries = 30
-
-        # try the current sample first
-        for attempt_idx in range(num_base_retries):
-            try:
-                sources = self.list_data_dict[i]
-                if isinstance(sources, dict):
-                    sources = [sources]
-                sample = self.item_fn(sources)
-                return sample
-            except Exception as e:
-                # sleep 1s in case it is a cloud disk issue
-                print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
-                time.sleep(1)
-
-        # try other samples, in case it is file corruption issue
-        for attempt_idx in range(num_base_retries):
-            try:
-                next_index = min(i + 1, len(self.list_data_dict) - 1)
-                sources = self.list_data_dict[next_index]
-                if isinstance(sources, dict):
-                    sources = [sources]
-
-                sample = self.item_fn(sources)
-                return sample
-            except Exception as e:
-                # no need to sleep
-                print(
-                    f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
-                    e,
-                )
-                pass
-
-        try:
-            sources = self.list_data_dict[i]
-            if isinstance(sources, dict):
-                sources = [sources]
-            sample = self.item_fn(sources)
-            return sample
-        except Exception as e:
-            raise e
-
-    def _get_item(self, sources) -> Dict[str, torch.Tensor]:
-        data_dict = preprocess_qwen_visual(
-            sources,
-            self.processor,
-        )
-
-        seq_len = data_dict["input_ids"][0].size(0)
-
-        if "image_grid_thw" in data_dict:
-            grid_thw = data_dict.get("image_grid_thw")
-            if not isinstance(grid_thw, Sequence):
-                grid_thw = [grid_thw]
-        else:
-            grid_thw = None
-
-        if "video_grid_thw" in data_dict:
-            video_grid_thw = data_dict.get("video_grid_thw")
-            if not isinstance(video_grid_thw, Sequence):
-                video_grid_thw = [video_grid_thw]
-            second_per_grid_ts = [
-                self.data_args.processor.video_processor.temporal_patch_size
-                / self.data_args.processor.video_processor.fps
-            ] * len(video_grid_thw)
-        else:
-            video_grid_thw = None
-            second_per_grid_ts = None
-
-        position_ids, _ = self.get_rope_index(
-            self.merge_size,
-            data_dict["input_ids"],
-            image_grid_thw=torch.cat(grid_thw, dim=0) if grid_thw else None,
-            video_grid_thw=(
-                torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
-            ),
-            second_per_grid_ts=second_per_grid_ts if second_per_grid_ts else None,
-        )
-
-        data_dict["position_ids"] = position_ids
-        data_dict["attention_mask"] = [seq_len]
-
-        text = self.processor.tokenizer.decode(
-            data_dict["input_ids"][0], skip_special_tokens=False
-        )
-
-        labels = data_dict["labels"][0]
-        labels = [
-            tid if tid != -100 else self.processor.tokenizer.pad_token_id
-            for tid in labels
-        ]
-        label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
-
-        return data_dict
-
-    def _get_packed_item(self, sources) -> Dict[str, torch.Tensor]:
-
-        if isinstance(sources, dict):
-            if isinstance(source, dict):
-                sources = [sources]
-            assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
-            return self._get_item(sources)
-
-        if isinstance(sources, list):
-            data_list = []
-            new_data_dict = {}
-            for source in sources:
-                if isinstance(source, dict):
-                    source = [source]
-                assert (
-                    len(source) == 1
-                ), f"Don't know why it is wrapped to a list.\n {source}"  # FIXME
-                data_list.append(self._get_item(source))
-
-            input_ids = torch.cat([d["input_ids"] for d in data_list], dim=1)
-            labels = torch.cat([d["labels"] for d in data_list], dim=1)
-            position_ids = torch.cat([d["position_ids"] for d in data_list], dim=2)
-            attention_mask = [
-                d["attention_mask"][0] for d in data_list if "attention_mask" in d
-            ]
-            new_data_dict = {
-                "input_ids": input_ids,
-                "labels": labels,
-                "position_ids": position_ids,
-                "attention_mask": attention_mask if attention_mask else None,
-            }
-
-            if any("pixel_values" in d for d in data_list):
-                new_data_dict.update(
-                    {
-                        "pixel_values": torch.cat(
-                            [
-                                d["pixel_values"]
-                                for d in data_list
-                                if "pixel_values" in d
-                            ],
-                            dim=0,
-                        ),
-                        "image_grid_thw": torch.cat(
-                            [
-                                d["image_grid_thw"]
-                                for d in data_list
-                                if "image_grid_thw" in d
-                            ],
-                            dim=0,
-                        ),
-                    }
-                )
-
-            if any("pixel_values_videos" in d for d in data_list):
-                new_data_dict.update(
-                    {
-                        "pixel_values_videos": torch.cat(
-                            [
-                                d["pixel_values_videos"]
-                                for d in data_list
-                                if "pixel_values_videos" in d
-                            ],
-                            dim=0,
-                        ),
-                        "video_grid_thw": torch.cat(
-                            [
-                                d["video_grid_thw"]
-                                for d in data_list
-                                if "video_grid_thw" in d
-                            ],
-                            dim=0,
-                        ),
-                    }
-                )
-            return new_data_dict
-
 
 def pad_and_cat(tensor_list):
     max_length = max(tensor.shape[2] for tensor in tensor_list)
@@ -676,6 +403,345 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
         batch["video_grid_thw"] = video_grid_thw
 
         return batch
+
+
+class LazySupervisedDataset(BaseDataset):
+    """
+    Dataset for supervised fine-tuning with lazy loading.
+    Inherits from BaseDataset and provides general supervised learning functionality.
+    """
+
+    NAME = "lazy_supervised"
+    
+    # Specify the corresponding collator class (will be set after defining the collator)
+    COLLATOR_CLASS = DataCollatorForSupervisedDataset  # Will be set to DataCollatorForSupervisedDataset later
+    ARGUMENT_CLASS = LazySupervisedDatasetArguments
+
+    def __init__(self, processor, data_args: BaseDatasetArguments):
+        """
+        Initialize supervised dataset.
+        
+        Args:
+            processor: The processor for handling images/videos
+            data_args: Dataset arguments (should be BaseDatasetArguments or its subclass)
+        """
+        super().__init__(processor, data_args)
+
+        random.seed(data_args.dataset_seed)
+        self.video_max_total_pixels = getattr(
+            data_args, "video_max_total_pixels", 1664 * 28 * 28
+        )
+        self.video_min_total_pixels = getattr(
+            data_args, "video_min_total_pixels", 256 * 28 * 28
+        )
+        self.model_type = data_args.model_type
+        if data_args.model_type == "qwen3vl":
+            self.get_rope_index = get_rope_index_3
+        elif data_args.model_type == "qwen2.5vl":
+            self.get_rope_index = get_rope_index_25
+        elif data_args.model_type == "qwen2vl":
+            self.get_rope_index = get_rope_index_2
+        else:
+            raise ValueError(f"model_type: {data_args.model_type} not supported")
+
+        processor = update_processor_pixels(processor, data_args)
+        self.processor = processor
+        self.tokenizer = processor.tokenizer
+        self.data_args = data_args
+        self.merge_size = getattr(processor.image_processor, "merge_size", 2)
+
+        if data_args.data_packing:
+            self.item_fn = self._get_packed_item
+        else:
+            self.item_fn = self._get_item
+
+        self.load_data()    
+
+    
+
+    def load_data(self):
+        """Load data from multiple datasets specified in data_args."""
+        dataset_use = getattr(self.data_args, 'dataset_use', '')
+        if not dataset_use:
+            rank0_print("Warning: dataset_use is empty, returning empty list")
+            return []
+        
+        dataset = dataset_use.split(",")
+        dataset_list = data_list(dataset)
+        rank0_print(f"Loading datasets: {dataset_list}")
+
+        list_data_dict = []
+
+        for data in dataset_list:
+            file_format = data["annotation_path"].split(".")[-1]
+            if file_format == "jsonl":
+                annotations = read_jsonl(data["annotation_path"])
+            else:
+                annotations = json.load(open(data["annotation_path"], "r"))
+            sampling_rate = data.get("sampling_rate", 1.0)
+            if sampling_rate < 1.0:
+                annotations = random.sample(
+                    annotations, int(len(annotations) * sampling_rate)
+                )
+                rank0_print(f"sampling {len(annotations)} examples from dataset {data}")
+            else:
+                rank0_print(f"dataset name: {data}")
+            for ann in annotations:
+                if isinstance(ann, list):
+                    for sub_ann in ann:
+                        sub_ann["data_path"] = data["data_path"]
+                else:
+                    ann["data_path"] = data["data_path"]
+            list_data_dict += annotations
+
+        rank0_print(f"Total training samples: {len(list_data_dict)}")
+        random.shuffle(list_data_dict)
+        self.list_data_dict = list_data_dict
+
+    
+    def __len__(self):
+        return len(self.list_data_dict)
+
+    @property
+    def lengths(self):
+        length_list = []
+        for sample in self.list_data_dict:
+            img_tokens = 128 if "image" in sample else 0
+            length_list.append(
+                sum(len(conv["value"].split()) for conv in sample["conversations"])
+                + img_tokens
+            )
+        return length_list
+
+    @property
+    def modality_lengths(self):
+        length_list = []
+        for sample in self.list_data_dict:
+            cur_len = sum(
+                len(conv["value"].split()) for conv in sample["conversations"]
+            )
+            cur_len = (
+                cur_len if ("image" in sample) or ("video" in sample) else -cur_len
+            )
+            length_list.append(cur_len)
+        return length_list
+
+    @property
+    def pre_calculated_length(self):
+        if "num_tokens" in self.list_data_dict[0]:
+            length_list = [sample["num_tokens"] for sample in self.list_data_dict]
+            return np.array(length_list)
+        else:
+            print("No pre-calculated length available.")
+            return np.array([1] * len(self.list_data_dict))
+    
+    def prepare_sources(self, i):
+        """Prepare sources for index i."""
+        return self.list_data_dict[i]
+
+    def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        """
+        Get item with retry logic.
+        Implements the abstract method from BaseDataset.
+        """
+        num_base_retries = 3
+
+        # try the current sample first
+        for attempt_idx in range(num_base_retries):
+            try:
+                sources = self.prepare_sources(i)
+                if isinstance(sources, dict):
+                    sources = [sources]
+                
+                # Choose the appropriate item function
+                if self.data_args.data_packing:
+                    sample = self._get_packed_item(sources)
+                else:
+                    sample = self._get_item(sources)
+                return sample
+            except Exception as e:
+                # sleep 1s in case it is a cloud disk issue
+                print(f"[Try #{attempt_idx}] Failed to fetch sample {i}. Exception:", e)
+                time.sleep(1)
+
+        # try other samples, in case it is file corruption issue
+        for attempt_idx in range(num_base_retries):
+            try:
+                next_index = min(i + 1, len(self.list_data_dict) - 1)
+                sources = self.prepare_sources(next_index)
+                if isinstance(sources, dict):
+                    sources = [sources]
+
+                # Choose the appropriate item function
+                if self.data_args.data_packing:
+                    sample = self._get_packed_item(sources)
+                else:
+                    sample = self._get_item(sources)
+                return sample
+            except Exception as e:
+                # no need to sleep
+                print(
+                    f"[Try other #{attempt_idx}] Failed to fetch sample {next_index}. Exception:",
+                    e,
+                )
+                pass
+
+        try:
+            sources = self.prepare_sources(i)
+            if isinstance(sources, dict):
+                sources = [sources]
+            # Choose the appropriate item function
+            if self.data_args.data_packing:
+                sample = self._get_packed_item(sources)
+            else:
+                sample = self._get_item(sources)
+            return sample
+        except Exception as e:
+            raise e
+    
+    def _print_sample_data(self, num_samples: int = 3):
+        """Print sample data for debugging."""
+        if len(self.list_data_dict) == 0:
+            rank0_print("No data to sample")
+            return
+        
+        rank0_print(f"================ Sample data ================")
+        for i in random.sample(range(len(self.list_data_dict)), 
+                              min(num_samples, len(self.list_data_dict))):
+            sample = self.prepare_sources(i)
+            rank0_print(f"Sample {i}: {sample}")
+        rank0_print(f"=============================================")
+
+    def _get_item(self, sources) -> Dict[str, torch.Tensor]:
+        data_dict = preprocess_qwen_visual(
+            sources,
+            self.processor,
+        )
+
+        seq_len = data_dict["input_ids"][0].size(0)
+
+        if "image_grid_thw" in data_dict:
+            grid_thw = data_dict.get("image_grid_thw")
+            if not isinstance(grid_thw, Sequence):
+                grid_thw = [grid_thw]
+        else:
+            grid_thw = None
+
+        if "video_grid_thw" in data_dict:
+            video_grid_thw = data_dict.get("video_grid_thw")
+            if not isinstance(video_grid_thw, Sequence):
+                video_grid_thw = [video_grid_thw]
+            second_per_grid_ts = [
+                self.data_args.processor.video_processor.temporal_patch_size
+                / self.data_args.processor.video_processor.fps
+            ] * len(video_grid_thw)
+        else:
+            video_grid_thw = None
+            second_per_grid_ts = None
+
+        position_ids, _ = self.get_rope_index(
+            self.merge_size,
+            data_dict["input_ids"],
+            image_grid_thw=torch.cat(grid_thw, dim=0) if grid_thw else None,
+            video_grid_thw=(
+                torch.cat(video_grid_thw, dim=0) if video_grid_thw else None
+            ),
+            second_per_grid_ts=second_per_grid_ts if second_per_grid_ts else None,
+        )
+
+        data_dict["position_ids"] = position_ids
+        data_dict["attention_mask"] = [seq_len]
+
+        text = self.processor.tokenizer.decode(
+            data_dict["input_ids"][0], skip_special_tokens=False
+        )
+
+        labels = data_dict["labels"][0]
+        labels = [
+            tid if tid != -100 else self.processor.tokenizer.pad_token_id
+            for tid in labels
+        ]
+        label = self.processor.tokenizer.decode(labels, skip_special_tokens=False)
+
+        return data_dict
+
+    def _get_packed_item(self, sources) -> Dict[str, torch.Tensor]:
+
+        if isinstance(sources, dict):
+            if isinstance(source, dict):
+                sources = [sources]
+            assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+            return self._get_item(sources)
+
+        if isinstance(sources, list):
+            data_list = []
+            new_data_dict = {}
+            for source in sources:
+                if isinstance(source, dict):
+                    source = [source]
+                assert (
+                    len(source) == 1
+                ), f"Don't know why it is wrapped to a list.\n {source}"  # FIXME
+                data_list.append(self._get_item(source))
+
+            input_ids = torch.cat([d["input_ids"] for d in data_list], dim=1)
+            labels = torch.cat([d["labels"] for d in data_list], dim=1)
+            position_ids = torch.cat([d["position_ids"] for d in data_list], dim=2)
+            attention_mask = [
+                d["attention_mask"][0] for d in data_list if "attention_mask" in d
+            ]
+            new_data_dict = {
+                "input_ids": input_ids,
+                "labels": labels,
+                "position_ids": position_ids,
+                "attention_mask": attention_mask if attention_mask else None,
+            }
+
+            if any("pixel_values" in d for d in data_list):
+                new_data_dict.update(
+                    {
+                        "pixel_values": torch.cat(
+                            [
+                                d["pixel_values"]
+                                for d in data_list
+                                if "pixel_values" in d
+                            ],
+                            dim=0,
+                        ),
+                        "image_grid_thw": torch.cat(
+                            [
+                                d["image_grid_thw"]
+                                for d in data_list
+                                if "image_grid_thw" in d
+                            ],
+                            dim=0,
+                        ),
+                    }
+                )
+
+            if any("pixel_values_videos" in d for d in data_list):
+                new_data_dict.update(
+                    {
+                        "pixel_values_videos": torch.cat(
+                            [
+                                d["pixel_values_videos"]
+                                for d in data_list
+                                if "pixel_values_videos" in d
+                            ],
+                            dim=0,
+                        ),
+                        "video_grid_thw": torch.cat(
+                            [
+                                d["video_grid_thw"]
+                                for d in data_list
+                                if "video_grid_thw" in d
+                            ],
+                            dim=0,
+                        ),
+                    }
+                )
+            return new_data_dict
+
 
 if __name__ == "__main__":
     pass

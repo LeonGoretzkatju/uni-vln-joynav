@@ -66,3 +66,9 @@ bash scripts/eval-qwen2_5.sh
 
 ## TODO
 - [ ] Fix bugs for KV Cache used in inference and evaluation.
+
+## Bugs
+```bash 
+# kill all gpu-pids
+nvidia-smi --query-compute-apps=pid --format=csv,noheader | xargs -r kill -9 
+```

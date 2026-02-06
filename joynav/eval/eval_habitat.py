@@ -7,41 +7,44 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 import numpy as np
 import torch
+import transformers
 from transformers import AutoProcessor
 
 # Import for Habitat registry side effects — do not remove
 from joynav.eval.habitat_extensions import measures
-from joynav.eval.habitat_vln_evaluator import VLNEvaluator
-from joynav.model.joynav_qwen3_vl import JoyNav_Qwen3VLForCausalLM
-from joynav.model.joynav_qwen2_5_vl import JoyNav_Qwen2_5_VLForCausalLM
+
+# Import models to register them
+import joynav.model
 from joynav.utils.dist import *
+from joynav.utils.registry import get_component, register_component
+from joynav.eval.base_evaluator import BaseEvaluatorArguments
+
+# Register evaluators
+from joynav.eval.habitat_vln_evaluator import StreamVLNEvaluator
+from joynav.eval.qwen3_vl_dit_evaluator import Qwen3VLDiTEvaluator
+from joynav.eval.qwen3_vl_cont_evaluator import Qwen3VLContEvaluator
+register_component('evaluator', 'streamvln', StreamVLNEvaluator)
+register_component('evaluator', 'qwen3_vl_dit', Qwen3VLDiTEvaluator)
+register_component('evaluator', 'qwen3_vl_cont', Qwen3VLContEvaluator)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Evaluate JoyNav on Habitat')
-    parser.add_argument("--model_type", default='joynav_qwen3_vl', type=str, help="model type: joynav_qwen3_vl / joynav_qwen2_5_vl")
-    parser.add_argument("--local_rank", default=0, type=int, help="node rank")
-    parser.add_argument("--model_path", type=str, default="")
-    parser.add_argument("--habitat_config_path", type=str, default='configs/vln_r2r.yaml')
-    parser.add_argument("--eval_split", type=str, default='val_unseen')
-    parser.add_argument("--output_path", type=str, default='./results/r2r/val_unseen')  #!
-    parser.add_argument("--num_future_steps", type=int, default=4)
-    parser.add_argument("--num_frames", type=int, default=32)
-    parser.add_argument("--save_video", action="store_true", default=False)
-    parser.add_argument("--num_history", type=int, default=8)
-    parser.add_argument("--min_pixels", type=int, default=None)
-    parser.add_argument("--max_pixels", type=int, default=392*392)
-    parser.add_argument("--max_new_tokens", type=int, default=128)
-    parser.add_argument("--use_cache", action="store_true", default=False)
+    """Two-stage argument parsing."""
+    # Stage 1: Parse selector to determine evaluator type
+    base_parser = transformers.HfArgumentParser(BaseEvaluatorArguments)
+    selector, remaining = base_parser.parse_args_into_dataclasses(
+        return_remaining_strings=True
+    )
+    
+    # Stage 2: Get evaluator-specific args class and parse full arguments
+    evaluator_class = get_component('evaluator', selector.evaluator_type)
+    evaluator_args_class = evaluator_class.get_argument_class()
+    
+    full_parser = transformers.HfArgumentParser(evaluator_args_class)
+    eval_args = full_parser.parse_args_into_dataclasses()[0]
+    
+    return eval_args
 
-    parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
-    parser.add_argument('--rank', default=0, type=int, help='rank')
-    parser.add_argument('--gpu', default=0, type=int, help='gpu')
-    parser.add_argument('--port', default='2333')
-    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
-    parser.add_argument('--device', default='cuda', help='device to use for training / testing')
-
-    return parser.parse_args()
 
 def rank0_print(*args):
     if get_rank() == 0:
@@ -87,40 +90,37 @@ def update_processor_pixels(processor, data_args):
     return processor
 
 def main():
+    # Parse arguments using two-stage parsing
     args = parse_args()
 
     init_distributed_mode(args)
     local_rank = args.local_rank
     np.random.seed(local_rank)
 
-    # * 1. Load model and tokenizer.
+    rank0_print(f"Evaluator type: {args.evaluator_type}")
+    rank0_print(f"Model type: {args.model_type}")
+
+    # * 1. Load model using registry
+    model_class = get_component('model', args.model_type)
+    rank0_print(f"Loading model from {args.model_path}")
+    
     processor = AutoProcessor.from_pretrained(args.model_path)
     processor.tokenizer.padding_side = 'left'
     update_processor_pixels(processor, args)
 
     device = torch.device(f"cuda:{local_rank}")
-    if args.model_type == 'joynav_qwen2_5_vl':
-        model = JoyNav_Qwen2_5_VLForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            # attn_implementation="flash_attention_2",
-            device_map={"": device},
-        )
-    elif args.model_type == 'joynav_qwen3_vl':
-        model = JoyNav_Qwen3VLForCausalLM.from_pretrained(
-            args.model_path,
-            torch_dtype=torch.bfloat16,
-            # attn_implementation="flash_attention_2",
-            device_map={"": device},
-        )
-    else:
-        raise ValueError(f"Invalid mode: {args.mode}")
-
+    model = model_class.from_pretrained(
+        args.model_path,
+        torch_dtype=torch.bfloat16,
+        # attn_implementation="flash_attention_2",
+        device_map={"": device},
+    )
     model.eval()
     world_size = get_world_size()
 
-    # * 2. initialize evaluator
-    evaluator = VLNEvaluator(
+    # * 2. Initialize evaluator using registry
+    evaluator_class = get_component('evaluator', args.evaluator_type)
+    evaluator = evaluator_class(
         config_path=args.habitat_config_path,
         split=args.eval_split,
         env_num=world_size,

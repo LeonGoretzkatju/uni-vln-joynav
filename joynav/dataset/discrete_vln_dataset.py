@@ -26,17 +26,17 @@ from .lazy_supervised_dataset import (
 )
 
 from .base_dataset_args import BaseDatasetArguments
-from .vln_action_dataset_args import VLNActionDatasetArguments
+from .discrete_vln_dataset_args import DiscreteVLNDatasetArguments
 
 
-class VLNActionDataset(LazySupervisedDataset):
+class DiscreteVLNDataset(LazySupervisedDataset):
     """
     Dataset for Vision-Language Navigation with Action Prediction.
     Inherits from LazySupervisedDataset and provides VLN-specific functionality.
     """
 
     # Specify the corresponding collator class
-    ARGUMENT_CLASS = VLNActionDatasetArguments
+    ARGUMENT_CLASS = DiscreteVLNDatasetArguments
 
     def __init__(self, processor, data_args: BaseDatasetArguments):
         """
@@ -47,9 +47,9 @@ class VLNActionDataset(LazySupervisedDataset):
             data_args: VLN-specific dataset arguments
         """
         # Validate args type
-        if not isinstance(data_args, VLNActionDatasetArguments):
+        if not isinstance(data_args, DiscreteVLNDatasetArguments):
             raise TypeError(
-                f"data_args must be VLNActionDatasetArguments, got {type(data_args)}"
+                f"data_args must be DiscreteVLNDatasetArguments, got {type(data_args)}"
             )
         
         # # VLN-specific attributes (set before calling super().__init__)
@@ -63,14 +63,8 @@ class VLNActionDataset(LazySupervisedDataset):
         self.x_norm_factor = data_args.x_norm_factor
         self.y_norm_factor = data_args.y_norm_factor
 
-        # Add Special Action Token
-        self.action_token = "<|action|>"
-        special_tokens_dict = {'additional_special_tokens': [self.action_token]}
-        num_new_tokens = processor.tokenizer.add_special_tokens(special_tokens_dict)
-        rank0_print(f"Adding {num_new_tokens} new tokens: {special_tokens_dict}")
-
         super().__init__(processor, data_args)
-
+        
         # VLN-specific setup
         self.idx2actions = {
             '0': 'STOP',
@@ -206,9 +200,7 @@ class VLNActionDataset(LazySupervisedDataset):
         history_str = (DEFAULT_IMAGE_TOKEN+'\n') * len(image_files)
         conversations[0]["value"] += history_str
         conversations[0]["value"] = conversations[0]["value"].replace('<instruction>.', instructions[ins_id])
-
-        discrete_text = self.actions2text(actions)
-        conversations[1]["value"] += self.action_token + discrete_text # self.actions2text(actions)
+        conversations[1]["value"] += self.actions2text(actions)
 
         sources = {
             "image": image_files,
@@ -254,28 +246,19 @@ class VLNActionDataset(LazySupervisedDataset):
         if self.add_continuous_action:
             continuous_actions = transform_actions(actions)
             data_dict['continuous_actions'] = continuous_actions
-            
-            input_ids = data_dict["input_ids"][0] # self.processor.tokenizer.decode(input_ids.numpy().tolist())
 
-            action_token_id = self.tokenizer.convert_tokens_to_ids(self.action_token)
-            matches = (input_ids == action_token_id).nonzero(as_tuple=True)[0]
+            input_ids = data_dict["input_ids"][0]
+            im_end_idx = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
+            im_end_pos = (input_ids == im_end_idx).nonzero(as_tuple=True)[0][0]
             select_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-
-            if len(matches) > 0:
-                action_idx = matches[-1]
-                select_mask[action_idx] = True
-                # input_ids[select_mask]
-            else:
-                # Fallback: (select_mask: all False)
-                rank0_print(f"Warning: Action token {self.action_token} not found in input_ids.")
-
+            select_mask[:im_end_pos + 1] = 1
             data_dict['select_mask'] = select_mask
         
         return data_dict
 
 
-class VLNActionCollator(DataCollatorForSupervisedDataset):
+class DiscreteVLNCollator(DataCollatorForSupervisedDataset):
     """Collator for VLN Action Dataset with continuous action representation."""
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract continuous actions and select masks
@@ -306,4 +289,4 @@ class VLNActionCollator(DataCollatorForSupervisedDataset):
 
 
 # Register the collator with the dataset
-VLNActionDataset.COLLATOR_CLASS = VLNActionCollator
+DiscreteVLNDataset.COLLATOR_CLASS = DiscreteVLNCollator
