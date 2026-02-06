@@ -192,7 +192,7 @@ class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration
             TODO: Add example
         """
         # import ipdb;ipdb.set_trace()
-        
+
         if position_ids is None:
             past_key_values_length = 0 if past_key_values is None else past_key_values.get_seq_length()
             if self.model.rope_deltas is None or past_key_values_length == 0:
@@ -302,6 +302,28 @@ class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration
         **kwargs,
     ) -> Union[tuple, Qwen3VLCausalLMOutputWithPast]:
 
+        if position_ids is None:
+            past_key_values_length = 0 if past_key_values is None else past_key_values.get_seq_length()
+            if self.model.rope_deltas is None or past_key_values_length == 0:
+                position_ids, rope_deltas = self.model.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    attention_mask=attention_mask,
+                )
+                self.model.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length = input_ids.shape
+                delta = (past_key_values_length + self.model.rope_deltas).to(input_ids.device)
+                position_ids = torch.arange(seq_length, device=input_ids.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -315,17 +337,14 @@ class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration
             cache_position=cache_position,
             **kwargs,
         )
-        
-        hidden_states = outputs[0]
-        backbone_output = BatchFeature(
-            data={"backbone_features": hidden_states, "backbone_attention_mask": attention_mask}
-        )
-        action_input = BatchFeature(
-            data={"embodiment_id": 0}
-        )
-        action_output = self.action_head.get_action(backbone_output, action_input)
 
-        return action_output
+        hidden_states = outputs[0]
+        last_layer_hidden_states = hidden_states[:,-1]
+        predicted_action = self.action_head(last_layer_hidden_states)
+
+        outputs['action_pred'] = predicted_action
+
+        return outputs
 
 
     def prepare_inputs_for_generation(
