@@ -14,7 +14,7 @@ NPROC_PER_NODE=8
 
 # DeepSpeed configuration
 # 注意,由于zero3.json会切分模型参数,会让ActionLatent初始化MultiheadAttention的tensor失败,需要使用zero2.json
-deepspeed=./scripts/zero3.json
+deepspeed=./scripts/zero2.json
 
 # Model configuration
 llm=/mnt/workspace/users/zhaolin/vln/models/Qwen3-VL-4B-Instruct
@@ -39,8 +39,8 @@ entry_file=joynav/train/train_qwen.py
 datasets="data/trajectory_data/R2R","data/trajectory_data/RxR"
 
 # Output configuration
-run_name="qwen3_vl_action"
-output_dir=./outputs/T_0205/stage1-r2r+rxr-freeze_vision-lr_${lr}-batch_size_${batch_size}-grad_accum_steps_${grad_accum_steps}-epochs_${num_train_epochs}-tune_mm_llm_${tune_mm_llm}
+run_name="qwen3_vl_action_zl"
+output_dir=./outputs/T_0205_zl/stage1-r2r+rxr-freeze_vision-lr_${lr}-batch_size_${batch_size}-grad_accum_steps_${grad_accum_steps}-epochs_${num_train_epochs}-tune_mm_llm_${tune_mm_llm}
 
 if [ ! -d "$output_dir" ]; then
   mkdir -p $output_dir
@@ -82,6 +82,7 @@ args="
     --gradient_checkpointing False \
     --dataloader_num_workers 0 \
     --run_name ${run_name} \
+    --reinit_token_embeddings True \
     --report_to tensorboard" \
 
 # Launch training

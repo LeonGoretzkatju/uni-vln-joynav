@@ -337,6 +337,25 @@ class Qwen3VLContEvaluator(BaseEvaluator):
         # env.episodes = env.episodes[0:1]
         return env
 
+    def process_input_tokens(self, inputs):
+        """
+        prefix: ...<|vision_end|><|im_end|>\n<|im_start|>assistant\n
+        pred:   <|action|>discrete_actions
+        --------
+        inference: input_ids = input_ids + <|action|>
+                                            hidden_states -> action_head -> trajs
+        """
+        action_special_tokens = self.processor.tokenizer.additional_special_tokens # ['<|action|>']
+        action_special_token_ids = self.processor.tokenizer.convert_tokens_to_ids(action_special_tokens)
+        batch_size = inputs["input_ids"].shape[0]
+        action_token_tensor = torch.tensor([action_special_token_ids] * batch_size, device=inputs["input_ids"].device)
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], action_token_tensor], dim=1)
+        if "attention_mask" in inputs:
+            attention_mask = inputs["attention_mask"]
+            ones = torch.ones((batch_size, 1), device=attention_mask.device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([attention_mask, ones], dim=1)
+            inputs["attention_mask"] = attention_mask
+
     def eval_action(self, idx) -> None:  # noqa: C901
         self.model.eval()
         env = self.config_env()
@@ -454,13 +473,20 @@ class Qwen3VLContEvaluator(BaseEvaluator):
                             inputs, source = self.prepare_inputs_use_cache(source, output_ids, llm_outputs, step_id, episode, rgb_list)
                         else:
                             inputs, source = self.prepare_inputs_no_cache(source, output_ids, llm_outputs, step_id, episode, rgb_list)
-                        
+
+                        if self.args.model_type == "qwen3_vl_action":
+                            self.process_input_tokens(inputs)
+
                         input_len = inputs.input_ids.shape[1]
                         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
                         cache_position = torch.arange(past_seen_tokens, input_len, device=inputs.input_ids.device) if past_key_values is not None else None
 
                         with torch.no_grad():
-                            outputs = self.model.predict_action(**inputs)
+                            
+                            if self.args.model_type == "qwen3_vl_action":
+                                outputs = self.model.predict_action(**inputs,past_key_values=past_key_values, cache_position=cache_position)
+                            else:
+                                outputs = self.model.predict_action(**inputs)
 
                         action_seq = self.parse_actions(outputs['action_pred'])
 
