@@ -82,7 +82,6 @@ args="
     --gradient_checkpointing False \
     --dataloader_num_workers 0 \
     --run_name ${run_name} \
-    --reinit_token_embeddings True \
     --report_to tensorboard" \
 
 # Launch training

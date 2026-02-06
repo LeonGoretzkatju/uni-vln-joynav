@@ -98,21 +98,6 @@ def set_model(model_args, model):
             p.requires_grad = False
         model.lm_head.requires_grad = False
 
-def reinit_special_token_embeddings(model, model_vocab_size, tokenizer_vocab_size):
-
-    num_new_tokens = tokenizer_vocab_size - model_vocab_size
-
-    input_embeddings = model.get_input_embeddings().weight.data
-    output_embeddings = model.get_output_embeddings().weight.data
-    
-    input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-    output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-
-    input_embeddings[-num_new_tokens:] = input_embeddings_avg
-    output_embeddings[-num_new_tokens:] = output_embeddings_avg
-    
-    rank0_print("Resized token embeddings and initialized new tokens with average embeddings.")
-
 
 def train(attn_implementation="flash_attention_2"):
     global local_rank
@@ -173,8 +158,6 @@ def train(attn_implementation="flash_attention_2"):
     if tokenizer_vocab_size > model_vocab_size:
         rank0_print(f"Resizing model embeddings from {model_vocab_size} to {tokenizer_vocab_size}")
         model.resize_token_embeddings(tokenizer_vocab_size)
-        if model_args.reinit_token_embeddings:
-            reinit_special_token_embeddings(model, model_vocab_size, tokenizer_vocab_size)
 
     set_model(model_args, model)
 
