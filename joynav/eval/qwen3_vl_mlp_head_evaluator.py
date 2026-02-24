@@ -150,7 +150,7 @@ def continuous_to_discrete_actions(
     return all_actions
 
 @dataclass
-class Qwen3VLContEvaluatorArguments:
+class Qwen3VLMLPEvaluatorArguments:
     """Arguments for VLN Evaluator - includes all parameters."""
     # Evaluator selection
     evaluator_type: str = field(default="vln", metadata={"help": "Type of evaluator: vln, etc."})
@@ -250,10 +250,10 @@ def build_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     return messages
     
 
-class Qwen3VLContEvaluator(BaseEvaluator):
+class Qwen3VLMLPEvaluator(BaseEvaluator):
     """VLN evaluator for discrete actions."""
     
-    ARGUMENT_CLASS = Qwen3VLContEvaluatorArguments
+    ARGUMENT_CLASS = Qwen3VLMLPEvaluatorArguments
     
     def __init__(
         self,

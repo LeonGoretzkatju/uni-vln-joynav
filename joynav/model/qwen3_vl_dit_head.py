@@ -21,7 +21,7 @@ from .base_argument import BaseArguments
 
         
 class JoyNavModelConfig(Qwen3VLConfig):
-    model_type = "joynav_qwen3vl_dit"
+    model_type = "qwen3_vl_dit_head"
     sub_configs = Qwen3VLConfig.sub_configs.copy()
     sub_configs["action_latent_config"] = ActionLatent_Config
     def __init__(self, 
@@ -58,7 +58,7 @@ class JoyNav_Qwen3VLDiTForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
 
     def __init__(self, config):
         Qwen3VLForConditionalGeneration.__init__(self, config)
-        config.model_type = "joynav_qwen3_vl"
+        config.model_type = "qwen3_vl_dit_head"
         
         self.model = Qwen3VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)

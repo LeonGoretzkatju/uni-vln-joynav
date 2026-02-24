@@ -102,7 +102,7 @@ class ActionMLP(nn.Module):
     
 
 class JoyNavModelConfig(Qwen3VLConfig):
-    model_type = "joynav_qwen3vl_action"
+    model_type = "qwen3_vl_mlp_head"
     sub_configs = Qwen3VLConfig.sub_configs.copy()
     sub_configs["action_head_config"] = ActionHead_Config
     def __init__(self, 
@@ -127,20 +127,20 @@ class JoyNavModelConfig(Qwen3VLConfig):
 
 
 @dataclass
-class JoyNav_Qwen3VLActionForCauslaLMArgruments(BaseArguments):
+class JoyNav_Qwen3VLMLPForCauslaLMArgruments(BaseArguments):
 
     propagate_action_head_grad: bool = field(default=True, metadata={"help": "Whether to propagate the gradients from action latent module to backbone LLM"})
     action_head_loss_weight: float = field(default=1.0, metadata={"help": "Weight for action latent loss"})
 
 
 
-class JoyNav_Qwen3VLActionForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
+class JoyNav_Qwen3VLMLPForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
     config_class = JoyNavModelConfig
-    ARGUMENT_CLASS = JoyNav_Qwen3VLActionForCauslaLMArgruments
+    ARGUMENT_CLASS = JoyNav_Qwen3VLMLPForCauslaLMArgruments
 
     def __init__(self, config:JoyNavModelConfig):
         Qwen3VLForConditionalGeneration.__init__(self, config)
-        config.model_type = "joynav_qwen3_vl"
+        config.model_type = "qwen3_vl_mlp_head"
         
         self.model = Qwen3VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)

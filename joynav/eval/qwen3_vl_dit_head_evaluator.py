@@ -367,14 +367,6 @@ class Qwen3VLDiTEvaluator(BaseEvaluator):
                     
                     observations = env.step(action)
                     step_id += 1
-                    # if step_id % self.num_frames == 0:
-                    #     output_ids = None
-                    #     past_key_values = None
-                    #     llm_outputs = None
-                    #     source = {
-                    #         "image": [],
-                    #         "conversations": [],
-                    #     }
 
                 process_bar.update(1)
 
