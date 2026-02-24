@@ -57,6 +57,8 @@ class VLNActionDataset(LazySupervisedDataset):
         self.max_window_size = data_args.max_window_size
         self.action_chunk_num = data_args.action_chunk_num
         self.sampling_stride = data_args.sampling_stride
+        self.history_sampling_mode = data_args.history_sampling_mode
+        self.split_forward = data_args.split_forward
 
         # Continuous action representation parameters
         self.add_continuous_action = data_args.add_continuous_action
@@ -172,7 +174,7 @@ class VLNActionDataset(LazySupervisedDataset):
             action_len = len(actions)
             ret = []
             for idx in range(start_idx, len(actions)):
-                if actions[idx] == 1:
+                if actions[idx] == 1 and self.split_forward:  # split forward into two steps
                     ret.extend([1, 1])  # each move forward is splited into two forward
                 else:
                     ret.append(actions[idx])
@@ -185,6 +187,10 @@ class VLNActionDataset(LazySupervisedDataset):
         data = self.nav_data[ep_id]
         video_path = data['video']
         video_frames = sorted(os.listdir(os.path.join(video_path, 'rgb')))
+        video_frames = {
+            int(filename.split('.')[0]): filename
+            for filename in video_frames
+        }
 
         instructions = data.get("instructions", None)
         if not isinstance(instructions, list):
@@ -196,10 +202,22 @@ class VLNActionDataset(LazySupervisedDataset):
     
         frame_num = random.randint(self.min_window_size, self.max_window_size)
         history_step_ids = []
-        if start_idx > 0:
-            history_step_ids = np.linspace(valid_idx, valid_idx + start_idx, 
-                num=min(frame_num-1, start_idx), endpoint=False, dtype=int).tolist()
-        history_step_ids += [valid_idx + start_idx]
+
+        # sampling mode
+        if self.history_sampling_mode == "uniform":
+            available_step_ids = sorted([step_id for step_id in video_frames.keys() if step_id < valid_idx + start_idx])
+            if len(available_step_ids) > frame_num - 1:
+                indices = np.linspace(0, len(available_step_ids) - 1, frame_num - 1, dtype=int)
+                history_step_ids = [available_step_ids[i] for i in indices] + [valid_idx + start_idx]
+            else:
+                history_step_ids = available_step_ids + [valid_idx + start_idx]
+
+        elif self.history_sampling_mode == "recent":
+            history_step_ids = list(range(valid_idx + start_idx + 1))
+            history_step_ids = history_step_ids[::-1][::self.action_chunk_num][:frame_num][::-1]
+        
+        else:
+            raise NotImplementedError(f"Unsupported sampling mode: {self.history_sampling_mode}")
         image_files = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in history_step_ids]
 
         conversations = copy.deepcopy(self.conversations)

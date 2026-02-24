@@ -48,4 +48,14 @@ class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
         default=0.433,
         metadata={"help": "Normalization factor for y-coordinate"}
     )
+
+    history_sampling_mode: Optional[str] = field(
+        default="uniform",
+        metadata={"help": "Sampling mode for historical frames, e.g., 'recent' or 'uniform'"}
+    )
+
+    split_forward: Optional[bool] = field(
+        default=True,
+        metadata={"help": "Whether to split forward and backward navigation data into separate samples"}
+    )
     
