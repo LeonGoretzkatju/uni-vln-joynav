@@ -122,7 +122,18 @@ class VLNActionDataset(LazySupervisedDataset):
         
         self.nav_data = []
         for vf in video_folder:
-            anno_json = json.load(open(os.path.join(vf, 'annotations.json'), 'r'))
+            splits = vf.split("%")
+            vf = splits[0]
+            ratio = 100
+            if len(splits) > 1:
+                ratio = int(splits[1])
+                rank0_print(f"Loading {ratio}% of data from {vf}")
+    
+            with open(os.path.join(vf, 'annotations.json'), 'r') as f:
+                anno_json = json.load(f)
+            if ratio < 100:
+                anno_json = random.sample(anno_json, int(len(anno_json) * ratio / 100))
+
             for tdata in anno_json:
                 tdata['video'] = os.path.join(vf, tdata['video'])
             self.nav_data += anno_json

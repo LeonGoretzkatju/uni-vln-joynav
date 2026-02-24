@@ -474,7 +474,7 @@ class Qwen3VLMLPEvaluator(BaseEvaluator):
                         else:
                             inputs, source = self.prepare_inputs_no_cache(source, output_ids, llm_outputs, step_id, episode, rgb_list)
 
-                        if self.args.model_type == "qwen3_vl_action":
+                        if self.args.model_type == "qwen3_vl_mlp_head":
                             self.process_input_tokens(inputs)
 
                         input_len = inputs.input_ids.shape[1]
@@ -483,7 +483,7 @@ class Qwen3VLMLPEvaluator(BaseEvaluator):
 
                         with torch.no_grad():
                             
-                            if self.args.model_type == "qwen3_vl_action":
+                            if self.args.model_type == "qwen3_vl_mlp_head":
                                 outputs = self.model.predict_action(**inputs,past_key_values=past_key_values, cache_position=cache_position)
                             else:
                                 outputs = self.model.predict_action(**inputs)
