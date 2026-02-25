@@ -4,10 +4,10 @@ import joynav.utils.registry
 from joynav.utils.registry import register_component
 from joynav.dataset.streamvln_dataset import StreamVLNDataset
 from joynav.dataset.continuous_action_dataset import ContinuousActionDataset
-from joynav.dataset.discrete_vln_dataset import DiscreteVLNDataset
 from joynav.dataset.vln_action_dataset import VLNActionDataset
+from joynav.dataset.vln_discrete_action_dataset import VLNDiscreteActionDataset
 
 register_component('dataset', 'streamvln', StreamVLNDataset)
 register_component('dataset', 'continuous_action', ContinuousActionDataset)
-register_component('dataset', 'discrete_vln', DiscreteVLNDataset)
 register_component('dataset', 'vln_action', VLNActionDataset)
+register_component('dataset', 'vln_discrete_action', VLNDiscreteActionDataset)

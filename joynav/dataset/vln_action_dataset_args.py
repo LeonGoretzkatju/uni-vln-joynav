@@ -34,6 +34,7 @@ class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
         metadata={"help": "Stride for sampling frames from videos"}
     )
     
+    # add continuous action representation
     add_continuous_action: Optional[bool] = field(
         default=True,
         metadata={"help": "Whether to add continuous action representation"}

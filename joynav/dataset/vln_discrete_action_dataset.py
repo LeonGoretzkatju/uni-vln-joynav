@@ -26,17 +26,17 @@ from .lazy_supervised_dataset import (
 )
 
 from .base_dataset_args import BaseDatasetArguments
-from .discrete_vln_dataset_args import DiscreteVLNDatasetArguments
+from .vln_discrete_action_dataset_args import VLNDiscreteActionDatasetArguments
 
 
-class DiscreteVLNDataset(LazySupervisedDataset):
+class VLNDiscreteActionDataset(LazySupervisedDataset):
     """
     Dataset for Vision-Language Navigation with Action Prediction.
     Inherits from LazySupervisedDataset and provides VLN-specific functionality.
     """
 
     # Specify the corresponding collator class
-    ARGUMENT_CLASS = DiscreteVLNDatasetArguments
+    ARGUMENT_CLASS = VLNDiscreteActionDatasetArguments
 
     def __init__(self, processor, data_args: BaseDatasetArguments):
         """
@@ -46,25 +46,19 @@ class DiscreteVLNDataset(LazySupervisedDataset):
             processor: The processor for handling images/videos
             data_args: VLN-specific dataset arguments
         """
-        # Validate args type
-        if not isinstance(data_args, DiscreteVLNDatasetArguments):
-            raise TypeError(
-                f"data_args must be DiscreteVLNDatasetArguments, got {type(data_args)}"
-            )
         
         # # VLN-specific attributes (set before calling super().__init__)
         self.min_window_size = data_args.min_window_size
         self.max_window_size = data_args.max_window_size
+        
         self.action_chunk_num = data_args.action_chunk_num
         self.sampling_stride = data_args.sampling_stride
+        self.history_sampling_mode = data_args.history_sampling_mode
+        self.split_forward = data_args.split_forward
 
-        # Continuous action representation parameters
-        self.add_continuous_action = data_args.add_continuous_action
-        self.x_norm_factor = data_args.x_norm_factor
-        self.y_norm_factor = data_args.y_norm_factor
 
         super().__init__(processor, data_args)
-        
+
         # VLN-specific setup
         self.idx2actions = {
             '0': 'STOP',
@@ -114,7 +108,18 @@ class DiscreteVLNDataset(LazySupervisedDataset):
         
         self.nav_data = []
         for vf in video_folder:
-            anno_json = json.load(open(os.path.join(vf, 'annotations.json'), 'r'))
+            splits = vf.split("%")
+            vf = splits[0]
+            ratio = 100
+            if len(splits) > 1:
+                ratio = int(splits[1])
+                rank0_print(f"Loading {ratio}% of data from {vf}")
+    
+            with open(os.path.join(vf, 'annotations.json'), 'r') as f:
+                anno_json = json.load(f)
+            if ratio < 100:
+                anno_json = random.sample(anno_json, int(len(anno_json) * ratio / 100))
+
             for tdata in anno_json:
                 tdata['video'] = os.path.join(vf, tdata['video'])
             self.nav_data += anno_json
@@ -166,7 +171,7 @@ class DiscreteVLNDataset(LazySupervisedDataset):
             action_len = len(actions)
             ret = []
             for idx in range(start_idx, len(actions)):
-                if actions[idx] == 1:
+                if actions[idx] == 1 and self.split_forward:  # split forward into two steps
                     ret.extend([1, 1])  # each move forward is splited into two forward
                 else:
                     ret.append(actions[idx])
@@ -179,6 +184,12 @@ class DiscreteVLNDataset(LazySupervisedDataset):
         data = self.nav_data[ep_id]
         video_path = data['video']
         video_frames = sorted(os.listdir(os.path.join(video_path, 'rgb')))
+        
+        first_img_id = int(video_frames[0].split('.')[0])
+        video_frames = {
+            int(filename.split('.')[0])-first_img_id: filename
+            for filename in video_frames
+        }
 
         instructions = data.get("instructions", None)
         if not isinstance(instructions, list):
@@ -190,103 +201,35 @@ class DiscreteVLNDataset(LazySupervisedDataset):
     
         frame_num = random.randint(self.min_window_size, self.max_window_size)
         history_step_ids = []
-        if start_idx > 0:
-            history_step_ids = np.linspace(valid_idx, valid_idx + start_idx, 
-                num=min(frame_num-1, start_idx), endpoint=False, dtype=int).tolist()
-        history_step_ids += [valid_idx + start_idx]
+
+        # sampling mode
+        if self.history_sampling_mode == "uniform":
+            available_step_ids = sorted([step_id for step_id in video_frames.keys() if step_id < valid_idx + start_idx])
+            if len(available_step_ids) > frame_num - 1:
+                indices = np.linspace(0, len(available_step_ids) - 1, frame_num - 1, dtype=int)
+                history_step_ids = [available_step_ids[i] for i in indices] + [valid_idx + start_idx]
+            else:
+                history_step_ids = available_step_ids + [valid_idx + start_idx]
+
+        elif self.history_sampling_mode == "recent":
+            history_step_ids = list(range(valid_idx + start_idx + 1))
+            history_step_ids = history_step_ids[::-1][::self.action_chunk_num][:frame_num][::-1]
+        
+        else:
+            raise NotImplementedError(f"Unsupported sampling mode: {self.history_sampling_mode}")
         image_files = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in history_step_ids]
 
         conversations = copy.deepcopy(self.conversations)
         history_str = (DEFAULT_IMAGE_TOKEN+'\n') * len(image_files)
         conversations[0]["value"] += history_str
         conversations[0]["value"] = conversations[0]["value"].replace('<instruction>.', instructions[ins_id])
+
         conversations[1]["value"] += self.actions2text(actions)
 
         sources = {
             "image": image_files,
             "conversations": conversations,
-            "actions": actions
         }
         return sources
 
-    def _get_item(self, sources) -> Dict[str, torch.Tensor]:
 
-        def transform_actions(actions):
-            forward_distance = 0.125
-            rotation_angle = np.radians(15)
-
-            continuous_actions = []
-            x_pos, y_pos, theta, is_stop = 0.0, 0.0, 0.0, 0
-            for i in range(self.action_chunk_num):
-                if i < len(actions):
-                    action = actions[i]
-                    if action == 0:
-                        is_stop = 1
-                    elif action == 1:
-                        x_pos = x_pos + forward_distance * np.cos(theta)
-                        y_pos = y_pos + forward_distance * np.sin(theta)
-                    elif action == 2:
-                        theta = (theta + rotation_angle) % (2 * np.pi)
-                    elif action == 3:
-                        theta = (theta + 2 * np.pi - rotation_angle) % (2 * np.pi)
-                continuous_actions.append([
-                    x_pos / self.x_norm_factor,
-                    y_pos / self.y_norm_factor,
-                    np.cos(theta),
-                    np.sin(theta),
-                    is_stop
-                ])
-            
-            continuous_actions = torch.tensor(continuous_actions, dtype=torch.float32)
-            return continuous_actions
-
-        actions = sources[0].pop("actions")
-        data_dict = super()._get_item(sources)
-
-        if self.add_continuous_action:
-            continuous_actions = transform_actions(actions)
-            data_dict['continuous_actions'] = continuous_actions
-
-            input_ids = data_dict["input_ids"][0]
-            im_end_idx = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
-
-            im_end_pos = (input_ids == im_end_idx).nonzero(as_tuple=True)[0][0]
-            select_mask = torch.zeros_like(input_ids, dtype=torch.bool)
-            select_mask[:im_end_pos + 1] = 1
-            data_dict['select_mask'] = select_mask
-        
-        return data_dict
-
-
-class DiscreteVLNCollator(DataCollatorForSupervisedDataset):
-    """Collator for VLN Action Dataset with continuous action representation."""
-    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        # Extract continuous actions and select masks
-        continuous_actions, select_masks = None, None
-        if "continuous_actions" in instances[0]:
-            continuous_actions = [instance.pop("continuous_actions") for instance in instances]
-            select_masks = [instance.pop("select_mask") for instance in instances]
-
-            # Get max sequence length for padding select_masks
-            max_len = max(mask.shape[0] for mask in select_masks)
-                    
-            # Pad select_masks to max_len
-            padded_select_masks = []
-            for mask in select_masks:
-                if mask.shape[0] < max_len:
-                    padding = torch.zeros(max_len - mask.shape[0], dtype=torch.bool)
-                    mask = torch.cat([mask, padding], dim=0)
-                padded_select_masks.append(mask)
-            
-            # Stack continuous actions and select masks
-            batch_continuous_actions = torch.stack(continuous_actions, dim=0)  # (batch_size, action_chunk_size, action_dim)
-            batch_select_masks = torch.stack(padded_select_masks, dim=0)  # (batch_size, max_len)
-        
-        batch = super().__call__(instances)
-        if continuous_actions is not None:
-            batch.update(dict(continuous_actions=batch_continuous_actions, select_mask=batch_select_masks))
-        return batch
-
-
-# Register the collator with the dataset
-DiscreteVLNDataset.COLLATOR_CLASS = DiscreteVLNCollator

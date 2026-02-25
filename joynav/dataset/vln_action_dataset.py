@@ -199,7 +199,7 @@ class VLNActionDataset(LazySupervisedDataset):
         video_path = data['video']
         video_frames = sorted(os.listdir(os.path.join(video_path, 'rgb')))
         video_frames = {
-            int(filename.split('.')[0]): filename
+            int(filename.split('.')[0])-1: filename
             for filename in video_frames
         }
 
