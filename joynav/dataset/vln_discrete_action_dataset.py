@@ -220,7 +220,7 @@ class VLNDiscreteActionDataset(LazySupervisedDataset):
         image_files = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in history_step_ids]
 
         conversations = copy.deepcopy(self.conversations)
-        history_str = (DEFAULT_IMAGE_TOKEN+'\n') * len(image_files)
+        history_str = (DEFAULT_IMAGE_TOKEN) * len(image_files)
         conversations[0]["value"] += history_str
         conversations[0]["value"] = conversations[0]["value"].replace('<instruction>.', instructions[ins_id])
 

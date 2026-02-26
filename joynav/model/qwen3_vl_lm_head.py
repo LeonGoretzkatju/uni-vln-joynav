@@ -32,11 +32,6 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
 
     def __init__(self, config):
         Qwen3VLForConditionalGeneration.__init__(self, config)
-        config.model_type = "joynav_qwen3_vl"
-
-        self.model = Qwen3VLModel(config)
-        self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        self.post_init()
 
     def get_model(self):
         return self.model
