@@ -168,17 +168,7 @@ class VLNDiscreteActionDataset(LazySupervisedDataset):
     def prepare_sources(self, i):
 
         def get_action_chunk(actions, start_idx):
-            action_len = len(actions)
-            ret = []
-            for idx in range(start_idx, len(actions)):
-                if actions[idx] == 1 and self.split_forward:  # split forward into two steps
-                    ret.extend([1, 1])  # each move forward is splited into two forward
-                else:
-                    ret.append(actions[idx])
-                if len(ret) >= self.action_chunk_num:
-                    break
-            ret = ret[:self.action_chunk_num]
-            return ret
+            return actions[start_idx: start_idx+self.action_chunk_num]
 
         ep_id, ins_id, start_idx, valid_idx = self.list_data_dict[i]
         data = self.nav_data[ep_id]
