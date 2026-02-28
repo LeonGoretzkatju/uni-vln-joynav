@@ -54,7 +54,6 @@ class VLNDiscreteActionDataset(LazySupervisedDataset):
         self.action_chunk_num = data_args.action_chunk_num
         self.sampling_stride = data_args.sampling_stride
         self.history_sampling_mode = data_args.history_sampling_mode
-        self.split_forward = data_args.split_forward
 
 
         super().__init__(processor, data_args)
@@ -105,7 +104,6 @@ class VLNDiscreteActionDataset(LazySupervisedDataset):
     def load_data(self):
         """Load VLN navigation data from video folders."""
         video_folder = self.data_args.video_folder.split(',')
-        
         self.nav_data = []
         for vf in video_folder:
             splits = vf.split("%")

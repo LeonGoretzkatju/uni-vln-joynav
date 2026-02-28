@@ -39,8 +39,4 @@ class VLNDiscreteActionDatasetArguments(LazySupervisedDatasetArguments):
         metadata={"help": "Sampling mode for historical frames, e.g., 'recent' or 'uniform'"}
     )
 
-    split_forward: Optional[bool] = field(
-        default=False,
-        metadata={"help": "Whether to split forward and backward navigation data into separate samples"}
-    )
     

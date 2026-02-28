@@ -43,6 +43,17 @@ class BaseModel(ABC):
     @classmethod
     def from_pretrained(self, pretrained_model_name_or_path: Optional[str] = None, **kwargs):
         model_args = kwargs.pop("model_args", None)
+        
+        if model_args is not None:
+            if "config" not in kwargs:
+                from transformers import AutoConfig
+                config = AutoConfig.from_pretrained(pretrained_model_name_or_path)
+            else:
+                config = kwargs.pop("config")
+            
+            for key, value in model_args.__dict__.items():
+                setattr(config, key, value)
+            kwargs["config"] = config
+        
         model = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
-        setattr(model, "model_args", model_args)
         return model

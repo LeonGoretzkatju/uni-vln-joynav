@@ -2,6 +2,7 @@
 This model optimize the Qwen3-VL with rolling cache and dynamic rope.
 """
 import types
+from abc import ABC
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -108,27 +109,17 @@ def forward_with_dynamic_rope(
     return attn_output, attn_weights
 
 
-class JoyNavModelConfig(Qwen3VLConfig):
-    model_type = "joynav_qwen3_vl"
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.model_cfg = kwargs.get('model_cfg', None)
-
-
-class JoyNav_Qwen3VLDynamicRopeForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
-    config_class = JoyNavModelConfig
+class Qwen3VLDynamicRopeInterface(ABC):
 
     def __init__(self, config):
-        Qwen3VLForConditionalGeneration.__init__(self, config)
+
+        super().__init__(config)
 
         for _, module in self.model.named_modules():
             if isinstance(module, Qwen3VLTextAttention):
                 module.forward = types.MethodType(forward_with_dynamic_rope, module)
-
-    def get_model(self):
-        return self.model
     
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,

@@ -13,6 +13,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 from torch.nn import CrossEntropyLoss
 
 from .base_model import BaseModel
+from .dynamic_rope_interface import Qwen3VLDynamicRopeInterface
 
 class JoyNavModelConfig(Qwen3VLConfig):
     model_type = "joynav_qwen3_vl"
@@ -21,11 +22,6 @@ class JoyNavModelConfig(Qwen3VLConfig):
         super().__init__(**kwargs)
         self.model_cfg = kwargs.get('model_cfg', None)
 
-class JoyNavModel(Qwen3VLModel):
-    config_class = JoyNavModelConfig
-
-    def __init__(self, config: Qwen3VLConfig):
-        super(JoyNavModel, self).__init__(config)
 
 class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
     config_class = JoyNavModelConfig
@@ -183,3 +179,8 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
             model_inputs["pixel_values"] = pixel_values
             model_inputs["pixel_values_videos"] = pixel_values_videos
         return model_inputs
+
+
+class JoyNav_Qwen3VLForCausalLMWithDynamicRope(Qwen3VLDynamicRopeInterface, JoyNav_Qwen3VLForCausalLM):
+
+    pass
