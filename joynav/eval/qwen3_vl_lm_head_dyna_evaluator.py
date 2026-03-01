@@ -244,7 +244,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
         intrinsic_matrix = self.get_intrinsic_matrix(
             self.config.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor
         )
-        sucs, spls, oss, nes = [], [], [], []
+        sucs, spls, oss, nes, ndtws = [], [], [], [], []
         done_res = []
 
         if os.path.exists(os.path.join(self.output_path, 'result.json')):
@@ -257,6 +257,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
                         spls.append(res['spl'])
                         oss.append(res['os'])
                         nes.append(res['ne'])
+                        ndtws.append(res.get('ndtw', 0))
 
         for scene in sorted(scene_episode_dict.keys()):
             episodes = scene_episode_dict[scene]
@@ -397,8 +398,9 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
                 spls.append(metrics['spl'])
                 oss.append(metrics['oracle_success'])
                 nes.append(metrics["distance_to_goal"])
+                ndtws.append(metrics.get("ndtw", 0))
                 print(
-                    f"scene_episode {scene_id}_{episode_id:04d} success: {metrics['success']}, spl: {metrics['spl']}, os: {metrics['oracle_success']}, ne: {metrics['distance_to_goal']}"
+                    f"scene_episode {scene_id}_{episode_id:04d} success: {metrics['success']}, spl: {metrics['spl']}, os: {metrics['oracle_success']}, ne: {metrics['distance_to_goal']}, ndtw: {metrics.get('ndtw', 0)}"
                 )
 
                 result = {
@@ -408,6 +410,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
                     "spl": metrics["spl"],
                     "os": metrics['oracle_success'],
                     "ne": metrics["distance_to_goal"],
+                    "ndtw": metrics.get("ndtw", 0),
                     "steps": step_id,
                     "episode_instruction": episode_instruction,
                 }
@@ -420,6 +423,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
             torch.tensor(spls).to(self.device),
             torch.tensor(oss).to(self.device),
             torch.tensor(nes).to(self.device),
+            torch.tensor(ndtws).to(self.device),
             torch.tensor(len(sucs)).to(self.device),
         )
 

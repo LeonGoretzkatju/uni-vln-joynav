@@ -136,7 +136,7 @@ def main():
     )
 
     # * 3. do eval
-    sucs, spls, oss, nes, ep_num = evaluator.eval_action(idx=get_rank())
+    sucs, spls, oss, nes, ndtws, ep_num = evaluator.eval_action(idx=get_rank())
     ep_num_all = [torch.zeros_like(ep_num) for _ in range(world_size)]
 
     # import ipdb; ipdb.set_trace()
@@ -145,21 +145,25 @@ def main():
     spls_all = [torch.zeros(ep_num_all[i], dtype=spls.dtype).to(spls.device) for i in range(world_size)]
     oss_all = [torch.zeros(ep_num_all[i], dtype=oss.dtype).to(oss.device) for i in range(world_size)]
     nes_all = [torch.zeros(ep_num_all[i], dtype=nes.dtype).to(nes.device) for i in range(world_size)]
+    ndtws_all = [torch.zeros(ep_num_all[i], dtype=ndtws.dtype).to(ndtws.device) for i in range(world_size)]
     dist.barrier()
     dist.all_gather(sucs_all, sucs)
     dist.all_gather(spls_all, spls)
     dist.all_gather(oss_all, oss)
     dist.all_gather(nes_all, nes)
+    dist.all_gather(ndtws_all, ndtws)
 
     sucs_all = torch.cat(sucs_all, dim=0)
     spls_all = torch.cat(spls_all, dim=0)
     oss_all = torch.cat(oss_all, dim=0)
     nes_all = torch.cat(nes_all, dim=0)
+    ndtws_all = torch.cat(ndtws_all, dim=0)
     result_all = {
         "sucs_all": (sum(sucs_all) / len(sucs_all)).item(),
         "spls_all": (sum(spls_all) / len(spls_all)).item(),
         "oss_all": (sum(oss_all) / len(oss_all)).item(),
         "nes_all": (sum(nes_all) / len(nes_all)).item(),
+        "ndtws_all": (sum(ndtws_all) / len(ndtws_all)).item(),
         'length': len(sucs_all),
     }
 
