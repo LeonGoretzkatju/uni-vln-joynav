@@ -89,6 +89,11 @@ def set_model(model_args, model):
         for n, p in model.visual.merger.named_parameters():
             p.requires_grad = False
 
+    if hasattr(model, 'model') and hasattr(model.model, 'geometry_encoder'):
+        # Always train the merger
+        for n, p in model.model.geometry_encoder.merger.named_parameters():
+            p.requires_grad = True
+
     if model_args.tune_mm_llm:
         for n, p in model.language_model.named_parameters():
             p.requires_grad = True

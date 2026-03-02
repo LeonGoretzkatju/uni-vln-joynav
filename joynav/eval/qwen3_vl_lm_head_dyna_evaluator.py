@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+from torchvision import transforms
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
@@ -63,10 +64,11 @@ class Qwen3VLLMHeadEvaluatorArguments:
 
     # VLN-specific parameters
     action_chunk_num: int = field(default=4, metadata={"help": "Number of actions to generate per chunk"})
-    min_window_size: int = field(default=9, metadata={"help": "Minimum window size for action generation"})
     max_window_size: int = field(default=16, metadata={"help": "Maximum window size for action generation"})
     temporal_interval: int = field(default=4, metadata={"help": "Temporal interval for action generation"})
     
+    sampling_mode: str = field(default="uniform", metadata={"help": "Sampling mode for historical frames: 'recent', 'uniform', or 'retrieval'"})
+
     # Distributed training parameters
     local_rank: int = field(default=0, metadata={"help": "Local rank for distributed training"})
     world_size: int = field(default=1, metadata={"help": "Number of distributed processes"})
@@ -216,7 +218,6 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
 
         # VLN-specifc parameters
         self.action_chunk_num = args.action_chunk_num
-        self.min_window_size = args.min_window_size
         self.max_window_size = args.max_window_size
         self.temporal_interval = args.temporal_interval
 
@@ -271,6 +272,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
                     else episode.object_category
                 )
                 print("episode start", episode_instruction)
+                self.episode_instruction = episode_instruction  # store for retrieval mode
                 episode_id = int(episode.episode_id)
                 if [scene_id, episode_id, episode_instruction] in done_res:
                     continue
@@ -338,15 +340,24 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
                         vis_frames.append(frame)
 
                     if len(action_seq) == 0:
-                        
-                        rgb_list.append(image)
+                        rgb_list.append(image)                        
                         past_key_values, past_inputs_ids = self.prepare_past_kv_cache_and_input_ids(step_id, all_cache, all_input_ids, rgb_list)
 
-                        inputs, text = self.prepare_inputs_use_cache(step_id, episode, rgb_list)
+                        inputs, source = self.prepare_inputs_use_cache(step_id, episode, rgb_list)
                         if past_key_values is not None:
                             inputs["input_ids"] = torch.cat([past_inputs_ids, inputs.input_ids], dim=1)
                             inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
 
+                        if getattr(self.model.config, "with_geometry_feature", False):
+                            input_images = source["image"]
+                            img = image.convert('RGB')
+                            width, height = img.size
+                            new_width, new_height = int(width * (14 / 16)), int(height * (14 / 16))  # Scale to 14/16 of original size
+                            img = img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+                            img_tensor = transforms.ToTensor()(img)  # Convert to [0, 1] float and permute to (C, H, W)
+                            image_tensors = torch.stack([img_tensor]).unsqueeze(0)
+                            inputs["image_tensors"] = image_tensors.to(self.model.device)
+                                                
                         x = self.decode_input_ids(inputs.input_ids)
 
                         input_len = inputs.input_ids.shape[1]
@@ -440,8 +451,17 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
         if step_id == 0:
             return None, None
 
-        image_len = len(rgb_list) - 1
-        image_ids = list(range(image_len))[::-1][:self.max_window_size][::-1]
+        image_len = len(rgb_list)
+
+        if self.args.sampling_mode == "recent":
+            image_ids = list(range(image_len - 1))[::-1][:self.max_window_size - 1][::-1]
+        elif self.args.sampling_mode == "uniform":
+            n = min(self.max_window_size, image_len)
+            image_ids = [round(i * (image_len - 1) / (n - 1)) if n > 1 else 0 for i in range(n)]
+            image_ids = sorted(set(image_ids))
+            image_ids = image_ids[:-1] # pop out the current frame
+        else:
+            raise NotImplementedError(f"Unsupported sampling mode: {self.args.sampling_mode}")
 
         used_input_ids = [all_input_ids["instruction"]] + [all_input_ids[f"frame_{i}"] for i in image_ids]
         used_cache = [all_cache["instruction"]] + [all_cache[f"frame_{i}"] for i in image_ids]
@@ -540,7 +560,7 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
         images, videos = process_vision_info(messages)
         inputs = self.processor(text=text, images=images, videos=videos, return_tensors="pt").to(self.model.device)
 
-        return inputs, text
+        return inputs, source
 
 
     def decode_input_ids(self, input_ids):
