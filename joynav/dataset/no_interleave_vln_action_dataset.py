@@ -52,18 +52,13 @@ class VLNActionDataset(LazySupervisedDataset):
                 f"data_args must be VLNActionDatasetArguments, got {type(data_args)}"
             )
         
-        # StreamVLN-style sampling attributes.
-        self.num_frames = data_args.num_frames
-        self.num_history = data_args.num_history
-        self.action_chunk_num = data_args.action_chunk_num
-
-        # Legacy attributes kept for compatibility with older scripts/configs.
+        # # VLN-specific attributes (set before calling super().__init__)
         self.min_window_size = data_args.min_window_size
         self.max_window_size = data_args.max_window_size
+        self.action_chunk_num = data_args.action_chunk_num
         self.sampling_stride = data_args.sampling_stride
         self.history_sampling_mode = data_args.history_sampling_mode
         self.split_forward = data_args.split_forward
-        self.sliding_window_size = data_args.sliding_window_size
 
         # Continuous action representation parameters
         self.add_continuous_action = data_args.add_continuous_action
@@ -85,15 +80,6 @@ class VLNActionDataset(LazySupervisedDataset):
             '2': "←",
             '3': "→",
         }
-        self.conjunctions = [
-            'you can see ',
-            'in front of you is ',
-            'there is ',
-            'you can spot ',
-            'you are toward the ',
-            'ahead of you is ',
-            'in your sight is '
-        ]
         
         prompt = (
             "You are an autonomous navigation assistant. Your task is to <instruction>. "
@@ -169,11 +155,11 @@ class VLNActionDataset(LazySupervisedDataset):
                 if actions_len - valid_idx < 4:
                     continue
                 
-                num_rounds = (actions_len - valid_idx) // self.num_frames
+                num_rounds = (actions_len - valid_idx) // self.sampling_stride
                 for n in range(num_rounds + 1):
-                    if n * self.num_frames == actions_len - valid_idx:
+                    if n * self.sampling_stride == actions_len - valid_idx:
                         continue
-                    list_data_dict.append((ep_id, ins_id, n * self.num_frames, valid_idx))
+                    list_data_dict.append((ep_id, ins_id, n * self.sampling_stride, valid_idx))
                 # for start_idx in range(0, actions_len - valid_idx):
                 #     list_data_dict.append((ep_id, ins_id, start_idx, valid_idx))
         rank0_print(f"Loaded {len(list_data_dict)} samples from {len(self.nav_data)} annotations.")
@@ -192,32 +178,21 @@ class VLNActionDataset(LazySupervisedDataset):
         text = ''.join(converted_sequence)
         return text
 
-    def prepare_conversation(self, conversation, action_chunks):
-        sources = []
-        for chunk_idx, step_actions in enumerate(action_chunks):
-            source = copy.deepcopy(conversation)
-            prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
-            if chunk_idx == 0:
-                source[0]["value"] += f" {prompt}."
-            else:
-                source[0]["value"] = f"{prompt}."
-
-            source[1]["value"] = self.action_token + self.actions2text(step_actions)
-            sources.extend(source)
-        return sources
-
-    def _chunk_actions(self, actions):
-        chunks = []
-        i = 0
-        while i < len(actions):
-            chunk = actions[i:i + self.action_chunk_num]
-            if len(chunk) == 0:
-                break
-            chunks.append(chunk)
-            i += len(chunk)
-        return chunks
-
+    
     def prepare_sources(self, i):
+
+        def get_action_chunk(actions, start_idx):
+            action_len = len(actions)
+            ret = []
+            for idx in range(start_idx, len(actions)):
+                if actions[idx] == 1 and self.split_forward:  # split forward into two steps
+                    ret.extend([1, 1])  # each move forward is splited into two forward
+                else:
+                    ret.append(actions[idx])
+                if len(ret) >= self.action_chunk_num:
+                    break
+            ret = ret[:self.action_chunk_num]
+            return ret
 
         ep_id, ins_id, start_idx, valid_idx = self.list_data_dict[i]
         data = self.nav_data[ep_id]
@@ -233,45 +208,47 @@ class VLNActionDataset(LazySupervisedDataset):
             instructions = [instructions]
 
         actions = data['actions'][1+valid_idx:] + [0]
-        actions_len = len(actions)
-        time_ids = np.arange(start_idx, min(start_idx + self.num_frames, actions_len))
-        assert len(time_ids) > 0
-        window_actions = np.array(actions)[time_ids].tolist()
+        # actions = np.array(actions)[start_idx: start_idx + self.action_chunk_num]
+        actions = get_action_chunk(actions, start_idx)
+    
+        frame_num = random.randint(self.min_window_size, self.max_window_size)
+        history_step_ids = []
 
-        sample_start = int(time_ids[0]) + valid_idx
-        sample_end = int(time_ids[-1]) + 1 + valid_idx
-        sample_step_ids = np.arange(sample_start, sample_end, self.action_chunk_num, dtype=np.int32).tolist()
-        sample_frames = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in sample_step_ids]
+        # sampling mode
+        if self.history_sampling_mode == "uniform":
+            available_step_ids = sorted([step_id for step_id in video_frames.keys() if step_id < valid_idx + start_idx])
+            if len(available_step_ids) > frame_num - 1:
+                indices = np.linspace(0, len(available_step_ids) - 1, frame_num - 1, dtype=int)
+                history_step_ids = [available_step_ids[i] for i in indices] + [valid_idx + start_idx]
+            else:
+                history_step_ids = available_step_ids + [valid_idx + start_idx]
 
-        if time_ids[0] != 0:
-            num_history = max(int(self.num_history), 1)
-            history_stride = max(int(time_ids[0]) // num_history, 1)
-            history_step_ids = np.arange(0 + valid_idx, int(time_ids[0]) + valid_idx, history_stride)
-            history_frames = [os.path.join(video_path, 'rgb', video_frames[int(idx)]) for idx in history_step_ids]
+        elif self.history_sampling_mode == "recent":
+            history_step_ids = list(range(valid_idx + start_idx + 1))
+            history_step_ids = history_step_ids[::-1][::self.action_chunk_num][:frame_num][::-1]
+        
         else:
-            history_frames = []
-
-        image_files = history_frames + sample_frames
+            raise NotImplementedError(f"Unsupported sampling mode: {self.history_sampling_mode}")
+        image_files = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in history_step_ids]
 
         conversations = copy.deepcopy(self.conversations)
-        if len(history_frames) > 0:
-            history_str = (DEFAULT_IMAGE_TOKEN+'\n') * len(history_frames)
-            conversations[0]["value"] += f" These are your historical observations: {history_str}."
+        history_str = (DEFAULT_IMAGE_TOKEN+'\n') * len(image_files)
+        conversations[0]["value"] += history_str
         conversations[0]["value"] = conversations[0]["value"].replace('<instruction>.', instructions[ins_id])
 
-        action_chunks = self._chunk_actions(window_actions)
-        interleave_conversations = self.prepare_conversation(conversations, action_chunks)
+        discrete_text = self.actions2text(actions)
+        conversations[1]["value"] += self.action_token + discrete_text # self.actions2text(actions)
 
         sources = {
             "image": image_files,
-            "conversations": interleave_conversations,
-            "actions": action_chunks
+            "conversations": conversations,
+            "actions": actions
         }
         return sources
 
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
 
-        def transform_action_chunk(actions):
+        def transform_actions(actions):
             forward_distance = 0.125
             rotation_angle = np.radians(15)
 
@@ -300,16 +277,6 @@ class VLNActionDataset(LazySupervisedDataset):
             continuous_actions = torch.tensor(continuous_actions, dtype=torch.float32)
             return continuous_actions
 
-        def transform_actions(actions):
-            if len(actions) == 0:
-                return torch.empty(0, self.action_chunk_num, 5, dtype=torch.float32)
-            first = actions[0]
-            if isinstance(first, (list, tuple, np.ndarray)):
-                action_chunks = actions
-            else:
-                action_chunks = [actions]
-            return torch.stack([transform_action_chunk(chunk) for chunk in action_chunks], dim=0)
-
         actions = sources[0].pop("actions")
         data_dict = super()._get_item(sources)
 
@@ -325,14 +292,9 @@ class VLNActionDataset(LazySupervisedDataset):
             select_mask = torch.zeros_like(input_ids, dtype=torch.bool)
 
             if len(matches) > 0:
-                num_action_chunks = continuous_actions.shape[0]
-                selected_matches = matches[-num_action_chunks:] if len(matches) >= num_action_chunks else matches
-                select_mask[selected_matches] = True
-                if len(selected_matches) != num_action_chunks:
-                    rank0_print(
-                        f"Warning: found {len(selected_matches)} action tokens for "
-                        f"{num_action_chunks} action chunks."
-                    )
+                action_idx = matches[-1]
+                select_mask[action_idx] = True
+                # input_ids[select_mask]
             else:
                 # Fallback: (select_mask: all False)
                 rank0_print(f"Warning: Action token {self.action_token} not found in input_ids.")
@@ -362,7 +324,8 @@ class VLNActionCollator(DataCollatorForSupervisedDataset):
                     mask = torch.cat([mask, padding], dim=0)
                 padded_select_masks.append(mask)
             
-            batch_continuous_actions = torch.cat(continuous_actions, dim=0)  # (num_action_chunks, action_chunk_size, action_dim)
+            # Stack continuous actions and select masks
+            batch_continuous_actions = torch.stack(continuous_actions, dim=0)  # (batch_size, action_chunk_size, action_dim)
             batch_select_masks = torch.stack(padded_select_masks, dim=0)  # (batch_size, max_len)
         
         batch = super().__call__(instances)

@@ -17,21 +17,31 @@ class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
         metadata={"help": "Path to video folders, comma-separated for multiple folders"}
     )
 
-    min_window_size: Optional[int] = field(
-        default=8,
-        metadata={"help": "Minimum window size for sampling frames"}
+    num_frames: Optional[int] = field(
+        default=32,
+        metadata={"help": "Number of trajectory action steps in each StreamVLN-style training window"}
     )
-    max_window_size: Optional[int] = field(
-        default=16,
-        metadata={"help": "Maximum window size for sampling frames"}
+    num_history: Optional[int] = field(
+        default=8,
+        metadata={"help": "Number of sparse historical frames to include before the sampled window"}
     )
     action_chunk_num: Optional[int] = field(
         default=8,
-        metadata={"help": "Number of future action steps to predict"}
+        metadata={"help": "Number of future action steps to predict per interleaved frame"}
+    )
+
+    # Legacy sampling parameters kept for CLI compatibility with older scripts.
+    min_window_size: Optional[int] = field(
+        default=8,
+        metadata={"help": "Legacy parameter; StreamVLN-style sampling uses num_frames"}
+    )
+    max_window_size: Optional[int] = field(
+        default=16,
+        metadata={"help": "Legacy parameter; StreamVLN-style sampling uses num_frames"}
     )
     sampling_stride: Optional[int] = field(
         default=4,
-        metadata={"help": "Stride for sampling frames from videos"}
+        metadata={"help": "Legacy parameter; StreamVLN-style sampling uses num_frames"}
     )
     
     # add continuous action representation
@@ -52,17 +62,12 @@ class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
 
     history_sampling_mode: Optional[str] = field(
         default="uniform",
-        metadata={"help": "Sampling mode for historical frames: 'recent', 'uniform', 'constuniform', or 'slidingwindow'"}
+        metadata={"help": "Legacy parameter; StreamVLN-style sampling is always sparse history + sampled frames"}
     )
 
     sliding_window_size: Optional[int] = field(
         default=4,
-        metadata={"help": "For 'slidingwindow' mode: size of the recent dense sample window (consecutive steps ending at current)."}
-    )
-
-    num_history: Optional[int] = field(
-        default=4,
-        metadata={"help": "For 'slidingwindow' mode: target number of sparse history frames before the sample window."}
+        metadata={"help": "Legacy parameter; StreamVLN-style sampling uses num_frames"}
     )
 
     split_forward: Optional[bool] = field(
