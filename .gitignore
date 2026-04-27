@@ -7,3 +7,4 @@ habitat-lab
 tests
 CLAUDE.md
 requirements.txt
+joynav/model/geometry_encoder/depth_anything_v2_vitl.pth

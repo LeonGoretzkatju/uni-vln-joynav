@@ -19,7 +19,7 @@ MASTER_PORT=${MASTER_PORT:-$(shuf -i 20001-29999 -n 1)}
 NNODES=${WORLD_SIZE:-1}
 NPROC_PER_NODE=${NPROC_PER_NODE:-2}
 
-deepspeed=${DEEPSPEED_CONFIG:-./scripts/zero2.json}
+deepspeed=${DEEPSPEED_CONFIG:-./scripts/zero2_offload_4090.json}
 
 llm=${MODEL_PATH:-/mnt/nas5/xiangchen/vlm_base/Qwen3-VL-2B-Instruct}
 model_type=qwen3_vl_lm_head_sf
