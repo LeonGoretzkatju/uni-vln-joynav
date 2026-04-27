@@ -60,6 +60,10 @@ class VLNActionDataset(LazySupervisedDataset):
         self.history_sampling_mode = data_args.history_sampling_mode
         self.split_forward = data_args.split_forward
 
+        # Sliding-window sampling parameters (used when history_sampling_mode == "slidingwindow")
+        self.sliding_window_size = data_args.sliding_window_size
+        self.num_history = data_args.num_history
+
         # Continuous action representation parameters
         self.add_continuous_action = data_args.add_continuous_action
         self.x_norm_factor = data_args.x_norm_factor
@@ -227,6 +231,37 @@ class VLNActionDataset(LazySupervisedDataset):
             history_step_ids = list(range(valid_idx + start_idx + 1))
             history_step_ids = history_step_ids[::-1][::self.action_chunk_num][:frame_num][::-1]
         
+        elif self.history_sampling_mode == "constuniform":
+            available_step_ids = sorted([step_id for step_id in video_frames.keys() if step_id < valid_idx + start_idx])
+            if available_step_ids > self.sampling_stride - 1:
+                indices = np.linspace(0, len(available_step_ids) - 1, self.sampling_stride, dtype=int)
+                history_step_ids = [available_step_ids[i] for i in indices] + [valid_idx + start_idx]
+            else:
+                history_step_ids = available_step_ids + [valid_idx + start_idx]
+
+        elif self.history_sampling_mode == "slidingwindow":
+            cur = valid_idx + start_idx
+            window_size = self.sliding_window_size
+            in_window_stride = max(self.action_chunk_num, 1)
+            num_history = max(self.num_history, 1)
+
+            # 1. Recent dense sample window: last `window_size` consecutive steps ending at cur,
+            #    sub-sampled at `in_window_stride`. Always force `cur` to be the last frame.
+            window_start = max(0, cur - window_size + 1)
+            sample_step_ids = list(range(window_start, cur + 1, in_window_stride))
+            if len(sample_step_ids) == 0 or sample_step_ids[-1] != cur:
+                sample_step_ids.append(cur)
+
+            # 2. Sparse history before the window (mirrors streamvln_dataset.py:195-197).
+            if window_start > 0:
+                stride_h = max(window_start // num_history, 1)
+                history_pre = np.arange(0, window_start, stride_h, dtype=int).tolist()
+            else:
+                history_pre = []
+
+            # 3. Concatenate; filter to frames actually present on disk.
+            available = set(video_frames.keys())
+            history_step_ids = [s for s in (history_pre + sample_step_ids) if s in available]
         else:
             raise NotImplementedError(f"Unsupported sampling mode: {self.history_sampling_mode}")
         image_files = [os.path.join(video_path, 'rgb', video_frames[idx]) for idx in history_step_ids]

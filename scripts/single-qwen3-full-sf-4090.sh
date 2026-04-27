@@ -66,6 +66,10 @@ args="
     --dataset_type ${dataset_type} \
     --model_name_or_path ${llm} \
     --video_folder ${datasets} \
+    --action_chunk_num 4 \
+    --sampling_stride 8 \
+    --add_continuous_action False \
+    --history_sampling_mode "uniform" \
     --data_flatten False \
     --tune_mm_vision False \
     --tune_mm_mlp True \
@@ -98,7 +102,7 @@ args="
     --model_max_length ${model_max_length} \
     --gradient_checkpointing True \
     --ddp_timeout 7200 \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers 2 \
     --run_name ${run_name} \
     --report_to tensorboard"
 

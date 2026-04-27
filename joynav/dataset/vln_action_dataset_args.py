@@ -52,7 +52,17 @@ class VLNActionDatasetArguments(LazySupervisedDatasetArguments):
 
     history_sampling_mode: Optional[str] = field(
         default="uniform",
-        metadata={"help": "Sampling mode for historical frames, e.g., 'recent' or 'uniform'"}
+        metadata={"help": "Sampling mode for historical frames: 'recent', 'uniform', 'constuniform', or 'slidingwindow'"}
+    )
+
+    sliding_window_size: Optional[int] = field(
+        default=4,
+        metadata={"help": "For 'slidingwindow' mode: size of the recent dense sample window (consecutive steps ending at current)."}
+    )
+
+    num_history: Optional[int] = field(
+        default=4,
+        metadata={"help": "For 'slidingwindow' mode: target number of sparse history frames before the sample window."}
     )
 
     split_forward: Optional[bool] = field(
