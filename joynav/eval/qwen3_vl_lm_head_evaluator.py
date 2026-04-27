@@ -61,7 +61,7 @@ class Qwen3VLLMHeadEvaluatorArguments:
     limit: int = field(default=-1, metadata={"help": "Limit number of evaluation episodes (0 for no limit)"})
 
     # VLN-specific parameters
-    action_chunk_num: int = field(default=4, metadata={"help": "Number of actions to generate per chunk"})
+    action_chunk_num: int = field(default=8, metadata={"help": "Number of actions to generate per chunk"})
     min_window_size: int = field(default=9, metadata={"help": "Minimum window size for action generation"})
     max_window_size: int = field(default=16, metadata={"help": "Maximum window size for action generation"})
     temporal_interval: int = field(default=4, metadata={"help": "Temporal interval for action generation"})

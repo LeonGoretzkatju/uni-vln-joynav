@@ -25,12 +25,16 @@ from joynav.eval.qwen3_vl_dit_head_evaluator import Qwen3VLDiTEvaluator
 from joynav.eval.qwen3_vl_mlp_head_evaluator import Qwen3VLMLPEvaluator
 from joynav.eval.qwen3_vl_lm_head_evaluator import Qwen3VLLMHeadEvaluator
 from joynav.eval.qwen3_vl_lm_head_dyna_evaluator import Qwen3VLLMDynamicRopeEvaluator
+from joynav.eval.qwen3_vl_lm_head_sf_evaluator import Qwen3VLSpatialForcingEvaluator
+from joynav.eval.qwen3_vl_lm_head_sf_dyna_evaluator import Qwen3VLSpatialForcingDynamicRopeEvaluator
 
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
 register_component('evaluator', 'qwen3_vl_dit_head', Qwen3VLDiTEvaluator)
 register_component('evaluator', 'qwen3_vl_mlp_head', Qwen3VLMLPEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head', Qwen3VLLMHeadEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head_dyna', Qwen3VLLMDynamicRopeEvaluator)
+register_component('evaluator', 'qwen3_vl_lm_head_sf', Qwen3VLSpatialForcingEvaluator)
+register_component('evaluator', 'qwen3_vl_lm_head_sf_dyna', Qwen3VLSpatialForcingDynamicRopeEvaluator)
 
 def parse_args():
     """Two-stage argument parsing."""
@@ -113,10 +117,15 @@ def main():
     update_processor_pixels(processor, args)
 
     device = torch.device(f"cuda:{local_rank}")
+    major_cc, _ = torch.cuda.get_device_capability(device)
+    eval_dtype = torch.bfloat16 if major_cc >= 8 and torch.cuda.is_bf16_supported() else torch.float16
+    attn_implementation = os.environ.get("ATTN_IMPLEMENTATION", "sdpa")
+    rank0_print(f"Evaluation dtype: {eval_dtype}, attention: {attn_implementation}")
+
     model = model_class.from_pretrained(
         args.model_path,
-        torch_dtype=torch.bfloat16,
-        # attn_implementation="flash_attention_2",
+        dtype=eval_dtype,
+        attn_implementation=attn_implementation,
         device_map={"": device},
     )
     model.eval()

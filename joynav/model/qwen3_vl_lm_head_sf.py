@@ -1,0 +1,272 @@
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+from typing import List, Optional, Union
+
+import torch
+
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLCausalLMOutputWithPast
+
+from .base_argument import BaseArguments
+from .geometry_encoder import DepthAnythingEncoder, GeometryEncoderConfig
+from .dynamic_rope_interface import Qwen3VLDynamicRopeInterface
+from .qwen3_vl_lm_head import JoyNavModelConfig, JoyNav_Qwen3VLForCausalLM
+from .spatial_forcing import (
+    SpatialForcingProjector,
+    add_spatial_positional_embedding,
+    cosine_alignment_loss,
+    parse_spatial_forcing_layers,
+    resize_spatial_features_to_grid,
+)
+
+
+DEFAULT_DA2_CHECKPOINT = "joynav/model/geometry_encoder/depth_anything_v2_vitl.pth"
+
+
+@dataclass
+class JoyNav_Qwen3VLSpatialForcingArguments(BaseArguments):
+    sf_enabled: bool = field(default=True, metadata={"help": "Enable Spatial Forcing alignment loss."})
+    sf_alpha: float = field(default=0.1, metadata={"help": "Weight for the Spatial Forcing alignment loss."})
+    sf_align_layers: str = field(default="24", metadata={"help": "Comma-separated decoder layers for SF, negative allowed."})
+    sf_geometry_encoder_path: str = field(
+        default=DEFAULT_DA2_CHECKPOINT,
+        metadata={"help": "Depth Anything V2 checkpoint used as frozen spatial target encoder."},
+    )
+    sf_target_dim: int = field(default=1024, metadata={"help": "Depth Anything V2 patch feature dimension."})
+    sf_projector_hidden_dim: Optional[int] = field(
+        default=None,
+        metadata={"help": "Hidden dimension for the SF projection MLP. Defaults to 2 * sf_target_dim."},
+    )
+    sf_add_pos_embed: bool = field(
+        default=True,
+        metadata={"help": "Add deterministic 2D position embedding to DA2 target features."},
+    )
+
+
+class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
+    """Qwen3-VL LM-head model with train-time Spatial Forcing supervision."""
+
+    config_class = JoyNavModelConfig
+    ARGUMENT_CLASS = JoyNav_Qwen3VLSpatialForcingArguments
+    _keys_to_ignore_on_save = [r"spatial_forcing_geometry_encoder\..*"]
+    _keys_to_ignore_on_load_missing = [r"spatial_forcing_geometry_encoder\..*"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.sf_enabled = bool(getattr(config, "sf_enabled", True))
+        self.sf_alpha = float(getattr(config, "sf_alpha", 0.1))
+        self.sf_target_dim = int(getattr(config, "sf_target_dim", 1024))
+        self.sf_add_pos_embed = bool(getattr(config, "sf_add_pos_embed", True))
+        self.sf_projector_hidden_dim = getattr(config, "sf_projector_hidden_dim", None)
+        self.sf_align_layer_spec = getattr(config, "sf_align_layers", "24")
+
+        self.spatial_forcing_projector = None
+        if self.sf_enabled:
+            self.spatial_forcing_projector = SpatialForcingProjector(
+                input_dim=config.text_config.hidden_size,
+                target_dim=self.sf_target_dim,
+                hidden_dim=self.sf_projector_hidden_dim,
+            )
+        self.__dict__["spatial_forcing_geometry_encoder"] = None
+        self.__dict__["_sf_debug_forward_count"] = 0
+
+    def state_dict(self, *args, **kwargs):
+        state_dict = super().state_dict(*args, **kwargs)
+        if bool(getattr(self.config, "sf_save_geometry_encoder", False)):
+            return state_dict
+        return {
+            key: value
+            for key, value in state_dict.items()
+            if not key.startswith("spatial_forcing_geometry_encoder.")
+        }
+
+    def _resolve_sf_layers(self) -> list[int]:
+        return parse_spatial_forcing_layers(
+            self.sf_align_layer_spec,
+            num_hidden_layers=len(self.model.language_model.layers),
+        )
+
+    def _register_spatial_forcing_hooks(self):
+        captured_hidden_states = {}
+        handles = []
+
+        def make_hook(layer_idx):
+            def hook(_module, _inputs, output):
+                captured_hidden_states[layer_idx] = output[0] if isinstance(output, tuple) else output
+
+            return hook
+
+        for layer_idx in sorted(set(self._resolve_sf_layers())):
+            handles.append(self.model.language_model.layers[layer_idx].register_forward_hook(make_hook(layer_idx)))
+        return captured_hidden_states, handles
+
+    def _get_geometry_encoder(self, device: torch.device) -> DepthAnythingEncoder:
+        if self.spatial_forcing_geometry_encoder is not None:
+            return self.spatial_forcing_geometry_encoder
+
+        ckpt_path = Path(getattr(self.config, "sf_geometry_encoder_path", DEFAULT_DA2_CHECKPOINT))
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"Depth Anything V2 checkpoint not found at {ckpt_path}. "
+                "Set --sf_geometry_encoder_path to the downloaded checkpoint."
+            )
+
+        encoder_config = GeometryEncoderConfig(
+            encoder_type="da2",
+            model_path=str(ckpt_path),
+            freeze_encoder=True,
+            out_hidden_size=self.sf_target_dim,
+            spatial_merge_size=getattr(self.config.vision_config, "spatial_merge_size", 2),
+        )
+        encoder = DepthAnythingEncoder(encoder_config).to(device)
+        encoder.eval()
+        for param in encoder.parameters():
+            param.requires_grad = False
+        self.__dict__["spatial_forcing_geometry_encoder"] = encoder
+        return encoder
+
+    def _build_spatial_targets(
+        self,
+        sf_image_tensors: torch.Tensor,
+        image_grid_thw: torch.LongTensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        sf_image_tensors = sf_image_tensors.to(device=device)
+        if sf_image_tensors.dim() == 4:
+            sf_image_tensors = sf_image_tensors.unsqueeze(0)
+
+        encoder = self._get_geometry_encoder(device)
+        with torch.no_grad():
+            da2_features = encoder.encode(sf_image_tensors).reshape(-1, sf_image_tensors.shape[-2] // 14 * (sf_image_tensors.shape[-1] // 14), self.sf_target_dim)
+
+        target_features = resize_spatial_features_to_grid(
+            da2_features.to(dtype=dtype),
+            source_hw=(sf_image_tensors.shape[-2] // 14, sf_image_tensors.shape[-1] // 14),
+            image_grid_thw=image_grid_thw.to(device),
+            spatial_merge_size=getattr(self.config.vision_config, "spatial_merge_size", 2),
+        )
+        if self.sf_add_pos_embed:
+            target_features = add_spatial_positional_embedding(
+                target_features,
+                image_grid_thw=image_grid_thw.to(device),
+                spatial_merge_size=getattr(self.config.vision_config, "spatial_merge_size", 2),
+            )
+        return target_features
+
+    def _compute_spatial_forcing_loss(
+        self,
+        captured_hidden_states: dict[int, torch.Tensor],
+        input_ids: torch.LongTensor,
+        image_grid_thw: torch.LongTensor,
+        sf_image_tensors: torch.Tensor,
+    ) -> torch.Tensor:
+        image_mask = input_ids == self.config.image_token_id
+        visual_token_count = int(image_mask.sum().item())
+        if visual_token_count == 0:
+            return next(self.spatial_forcing_projector.parameters()).sum() * 0.0
+
+        first_hidden = next(iter(captured_hidden_states.values()))
+        target_features = self._build_spatial_targets(
+            sf_image_tensors=sf_image_tensors,
+            image_grid_thw=image_grid_thw,
+            device=first_hidden.device,
+            dtype=first_hidden.dtype,
+        )
+        if target_features.shape[0] != visual_token_count:
+            raise ValueError(
+                "Spatial Forcing target/image-token mismatch: "
+                f"{target_features.shape[0]} DA2 target tokens vs {visual_token_count} Qwen image tokens."
+            )
+
+        losses = []
+        for layer_idx in self._resolve_sf_layers():
+            visual_tokens = captured_hidden_states[layer_idx][image_mask]
+            projected_tokens = self.spatial_forcing_projector(visual_tokens)
+            losses.append(cosine_alignment_loss(projected_tokens, target_features))
+        return torch.stack(losses).mean()
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        sf_image_tensors: Optional[torch.FloatTensor] = None,
+        **kwargs,
+    ) -> Union[tuple, Qwen3VLCausalLMOutputWithPast]:
+        use_spatial_forcing = (
+            self.training
+            and self.sf_enabled
+            and labels is not None
+            and sf_image_tensors is not None
+            and image_grid_thw is not None
+            and input_ids is not None
+        )
+
+        captured_hidden_states, handles = ({}, [])
+        if use_spatial_forcing:
+            captured_hidden_states, handles = self._register_spatial_forcing_hooks()
+
+        try:
+            outputs = super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                cache_position=cache_position,
+                logits_to_keep=logits_to_keep,
+                **kwargs,
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        spatial_forcing_loss = None
+        if use_spatial_forcing:
+            spatial_forcing_loss = self._compute_spatial_forcing_loss(
+                captured_hidden_states=captured_hidden_states,
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                sf_image_tensors=sf_image_tensors,
+            )
+            outputs.loss = spatial_forcing_loss * self.sf_alpha if outputs.loss is None else outputs.loss + spatial_forcing_loss * self.sf_alpha
+            if os.environ.get("JOYNAV_SF_DEBUG", "0") == "1" and int(os.environ.get("LOCAL_RANK", "0")) == 0:
+                if self.__dict__["_sf_debug_forward_count"] < 10:
+                    print(
+                        "[SpatialForcing] "
+                        f"layer={self.sf_align_layer_spec} "
+                        f"align_loss={float(spatial_forcing_loss.detach()):.6f} "
+                        f"alpha={self.sf_alpha:.6f} "
+                        f"scaled_align_loss={float((spatial_forcing_loss * self.sf_alpha).detach()):.6f} "
+                        f"total_loss={float(outputs.loss.detach()):.6f}",
+                        flush=True,
+                    )
+                self.__dict__["_sf_debug_forward_count"] += 1
+
+        outputs.spatial_forcing_loss = spatial_forcing_loss.detach() if spatial_forcing_loss is not None else None
+        return outputs
+
+
+class JoyNav_Qwen3VLSpatialForcingForCausalLMWithDynamicRope(
+    Qwen3VLDynamicRopeInterface,
+    JoyNav_Qwen3VLSpatialForcingForCausalLM,
+):
+    """Spatial-Forcing Qwen3-VL with dynamic RoPE for rolling-cache eval."""
+
+    config_class = JoyNavModelConfig
+    ARGUMENT_CLASS = JoyNav_Qwen3VLSpatialForcingArguments

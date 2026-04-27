@@ -61,6 +61,17 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
     """Collects the state dict and dump to disk."""
 
     trainer.accelerator.wait_for_everyone()
+
+    # PEFT model: save only LoRA adapters
+    try:
+        from peft import PeftModel
+        if isinstance(trainer.model, PeftModel):
+            if trainer.args.should_save:
+                trainer.model.save_pretrained(output_dir)
+            return
+    except ImportError:
+        pass
+
     if trainer.deepspeed:
         torch.cuda.synchronize()
         print(f"Saving model checkpoint with local_rank {trainer.args.local_rank}")
@@ -124,6 +135,35 @@ def train(attn_implementation="flash_attention_2"):
     )
     model.post_update_model()
 
+    # Apply LoRA if enabled
+    if model_args.use_lora:
+        from peft import LoraConfig, get_peft_model
+
+        target_modules = [m.strip() for m in model_args.lora_target_modules.split(",")]
+        modules_to_save = [m.strip() for m in model_args.lora_modules_to_save.split(",") if m.strip()]
+
+        # Keep merger fully trainable if tune_mm_mlp is set
+        if model_args.tune_mm_mlp and "merger" not in modules_to_save:
+            modules_to_save.append("merger")
+        # Keep action_head fully trainable if present
+        if hasattr(model, "action_head") and "action_head" not in modules_to_save:
+            modules_to_save.append("action_head")
+        if getattr(model, "spatial_forcing_projector", None) is not None and "spatial_forcing_projector" not in modules_to_save:
+            modules_to_save.append("spatial_forcing_projector")
+
+        lora_config = LoraConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            target_modules=target_modules,
+            lora_dropout=model_args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            modules_to_save=modules_to_save if modules_to_save else None,
+        )
+        model = get_peft_model(model, lora_config)
+        rank0_print("LoRA applied. Trainable parameters:")
+        model.print_trainable_parameters()
+
     if "qwen3_vl" in data_args.model_type:
         data_args.model_type = "qwen3vl"
     elif "qwen2_5_vl" in data_args.model_type:
@@ -164,11 +204,15 @@ def train(attn_implementation="flash_attention_2"):
         rank0_print(f"Resizing model embeddings from {model_vocab_size} to {tokenizer_vocab_size}")
         model.resize_token_embeddings(tokenizer_vocab_size)
 
-    set_model(model_args, model)
+    if not model_args.use_lora:
+        set_model(model_args, model)
 
     if torch.distributed.get_rank() == 0:
-        model.visual.print_trainable_parameters()
-        model.model.print_trainable_parameters()
+        if model_args.use_lora:
+            model.print_trainable_parameters()
+        else:
+            model.visual.print_trainable_parameters()
+            model.model.print_trainable_parameters()
     
     trainer = Trainer(
         model=model, processing_class=processor, args=training_args, **data_module
@@ -188,4 +232,6 @@ def train(attn_implementation="flash_attention_2"):
 
 
 if __name__ == "__main__":
-    train(attn_implementation="flash_attention_2")
+    # ATTN_IMPLEMENTATION env var lets Turing-class GPUs (TITAN RTX, 20xx)
+    # fall back to "sdpa"/"eager" since flash-attn-2 needs sm_8.0+.
+    train(attn_implementation=os.environ.get("ATTN_IMPLEMENTATION", "flash_attention_2"))

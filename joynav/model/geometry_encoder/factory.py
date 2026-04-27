@@ -1,9 +1,22 @@
 """Factory for creating geometry encoders."""
 
-from typing import Optional
 from .base import BaseGeometryEncoder, GeometryEncoderConfig
-from .pi3_encoder import Pi3Encoder
 from .depth_anything_encoder import DepthAnythingEncoder
+
+try:
+    from .vggt_encoder import VGGTEncoder
+except ImportError:
+    VGGTEncoder = None
+
+try:
+    from .pi3_encoder import Pi3Encoder
+except ImportError:
+    Pi3Encoder = None
+
+try:
+    from .da3_encoder import DA3Encoder
+except ImportError:
+    DA3Encoder = None
 
 
 def create_geometry_encoder(config) -> BaseGeometryEncoder:
@@ -22,10 +35,16 @@ def create_geometry_encoder(config) -> BaseGeometryEncoder:
     """
     encoder_type = config.encoder_type.lower()
     if encoder_type == "vggt":
+        if VGGTEncoder is None:
+            raise ImportError("VGGTEncoder is not available in this checkout.")
         return VGGTEncoder(config)
     elif encoder_type == "pi3":
+        if Pi3Encoder is None:
+            raise ImportError("Pi3Encoder is not available in this checkout.")
         return Pi3Encoder(config)
     elif encoder_type == "da3":
+        if DA3Encoder is None:
+            raise ImportError("DA3Encoder is not available in this checkout.")
         return DA3Encoder(config)
     elif encoder_type == "da2":
         return DepthAnythingEncoder(config)

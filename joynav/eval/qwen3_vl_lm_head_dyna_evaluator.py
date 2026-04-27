@@ -59,7 +59,7 @@ class Qwen3VLLMHeadEvaluatorArguments:
     
     # Evaluation parameters
     save_video: bool = field(default=False, metadata={"help": "Whether to save video of trajectories"})
-    use_cache: bool = field(default=False, metadata={"help": "Whether to use KV cache during generation"})
+    use_cache: bool = field(default=True, metadata={"help": "Whether to use KV cache during generation"})
     limit: int = field(default=-1, metadata={"help": "Limit number of evaluation episodes (0 for no limit)"})
 
     # VLN-specific parameters
@@ -475,9 +475,33 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
             keys = torch.cat([cache.layers[layer_idx].keys for cache in used_cache], dim=2)
             values = torch.cat([cache.layers[layer_idx].values for cache in used_cache], dim=2)
             merged_cache.update(keys, values, layer_idx)
-        
+
+        position_embeddings = [
+            getattr(cache, "_dynamic_rope_position_embeddings", None)
+            for cache in used_cache
+        ]
+        if all(position_embeddings):
+            merged_cache._dynamic_rope_position_embeddings = (
+                torch.cat([emb[0] for emb in position_embeddings], dim=1),
+                torch.cat([emb[1] for emb in position_embeddings], dim=1),
+            )
+
         return merged_cache, merged_input_ids
-        
+
+    def _slice_cache(self, past_key_values, start, end):
+        cache = DynamicCache(config=self.model.language_model.config)
+        for layer_idx in range(len(past_key_values.layers)):
+            keys = past_key_values.layers[layer_idx].keys[:, :, start:end, :]
+            values = past_key_values.layers[layer_idx].values[:, :, start:end, :]
+            cache.update(keys, values, layer_idx)
+
+        position_embeddings = getattr(past_key_values, "_dynamic_rope_position_embeddings", None)
+        if position_embeddings is not None:
+            cache._dynamic_rope_position_embeddings = (
+                position_embeddings[0][:, start:end].contiguous(),
+                position_embeddings[1][:, start:end].contiguous(),
+            )
+        return cache
 
     def store_kv_cahce_and_input_ids(self, frame_id, past_key_values, input_ids, all_cache, all_input_ids):
 
@@ -487,28 +511,14 @@ class Qwen3VLLMDynamicRopeEvaluator(BaseEvaluator):
         if frame_id == 0:
             vision_start_position = (input_ids == vision_start_token_id).nonzero(as_tuple=True)[1][0].item()    # the position of first <|vision_start|>
             s, e = 0, vision_start_position
-            
-            cache = DynamicCache(config=self.model.language_model.config)
-            # for layer_idx, layer in enumerate(past_key_values.layers):    
-            for layer_idx in range(len(past_key_values)):
-                keys, values = past_key_values[layer_idx]
-                keys = keys[:, :, s:e, :]
-                values = values[:, :, s:e, :]
-                cache.update(keys, values, layer_idx)
 
-            all_cache["instruction"] = cache
+            all_cache["instruction"] = self._slice_cache(past_key_values, s, e)
             all_input_ids["instruction"] = input_ids[:, s:e]
-        
+
         s = (input_ids == vision_start_token_id).nonzero(as_tuple=True)[1][-1].item()
         e = (input_ids == vision_end_token_id).nonzero(as_tuple=True)[1][-1].item()
-        cache = DynamicCache(config=self.model.language_model.config)
-        for layer_idx in range(len(past_key_values)):
-            keys, values = past_key_values[layer_idx]
-            keys = keys[:, :, s:e+1, :]
-            values = values[:, :, s:e+1, :]
-            cache.update(keys, values, layer_idx)
-        
-        all_cache[f"frame_{frame_id}"] = cache
+
+        all_cache[f"frame_{frame_id}"] = self._slice_cache(past_key_values, s, e + 1)
         all_input_ids[f"frame_{frame_id}"] = input_ids[:, s:e+1]
 
         return all_cache, all_input_ids

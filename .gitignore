@@ -2,3 +2,8 @@ __pycache__
 results
 data
 outputs
+.claude
+habitat-lab
+tests
+CLAUDE.md
+requirements.txt

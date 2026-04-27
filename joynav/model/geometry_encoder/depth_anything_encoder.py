@@ -1,8 +1,7 @@
 """DepthAnything geometry encoder implementation."""
-import os
+from contextlib import nullcontext
+
 import torch
-import torch.nn as nn
-from typing import Optional, List, Tuple, Union
 import logging
 from .base import BaseGeometryEncoder, GeometryEncoderConfig
 from .merger import GeometryPatchMerger
@@ -28,6 +27,8 @@ class DepthAnythingEncoder(BaseGeometryEncoder):
 
         # Initialize DepthAnythingV2 model
         self.model = DepthAnythingV2(**self.model_configs[self.encoder_type])
+        if config.model_path:
+            self.load_model(config.model_path)
         
         # Freeze parameters if required
         if self.freeze_encoder:
@@ -47,17 +48,20 @@ class DepthAnythingEncoder(BaseGeometryEncoder):
     def encode(self, images: torch.Tensor) -> torch.Tensor:
         """Encode images using DepthAnything's ViT encoder."""
         self.model.eval()
-        B, N, _, H, W = images.shape
-        images = images.reshape(B*N, _, H, W)
+        if images.dim() == 4:
+            images = images.unsqueeze(0)
+        B, N, C, H, W = images.shape
+        images = images.reshape(B * N, C, H, W)
         
-        dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        use_cuda_amp = images.is_cuda and torch.cuda.is_available()
+        dtype = torch.bfloat16 if use_cuda_amp and torch.cuda.get_device_capability(images.device)[0] >= 8 else torch.float16
+        autocast_context = torch.cuda.amp.autocast(dtype=dtype) if use_cuda_amp else nullcontext()
         with torch.no_grad():
-            with torch.cuda.amp.autocast(dtype=dtype):
-                # encoder_output = self.model.encoder(images)
+            with autocast_context:
                 features = self.model.pretrained.get_intermediate_layers(
                     images, self.model.intermediate_layer_idx[self.model.encoder], 
                     return_class_token=True
-                )[-1][-0]
+                )[-1][0]
         
         features = features.reshape(B, N, -1, features.shape[-1])
         return features
@@ -79,8 +83,10 @@ class DepthAnythingEncoder(BaseGeometryEncoder):
         features = self.encode(images)
         features = features.reshape(B*N, H // self.patch_size, W // self.patch_size, -1)
         
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-        with torch.cuda.amp.autocast(dtype=dtype):
+        use_cuda_amp = features.is_cuda and torch.cuda.is_available()
+        dtype = torch.bfloat16 if use_cuda_amp and torch.cuda.get_device_capability(features.device)[0] >= 8 else torch.float16
+        autocast_context = torch.cuda.amp.autocast(dtype=dtype) if use_cuda_amp else nullcontext()
+        with autocast_context:
             outputs = self.merger(features)
         outputs = outputs.reshape(B, N, *outputs.shape[1:])     # [B, N, H, W, C]
         return outputs

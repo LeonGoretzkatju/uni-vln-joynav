@@ -12,6 +12,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 from torch.nn import CrossEntropyLoss
 
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
+
 from .base_model import BaseModel
 from .dynamic_rope_interface import Qwen3VLDynamicRopeInterface
 
@@ -182,5 +184,31 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
 
 
 class JoyNav_Qwen3VLForCausalLMWithDynamicRope(Qwen3VLDynamicRopeInterface, JoyNav_Qwen3VLForCausalLM):
+    """Qwen3-VL LM-head model with dynamic RoPE for rolling KV-cache inference.
 
-    pass
+    During training (``past_key_values is None``) behavior is identical to the
+    base :class:`JoyNav_Qwen3VLForCausalLM`. The dynamic-rope path activates at
+    inference time when a cache is present — see
+    :func:`dynamic_rope_interface.forward_with_dynamic_rope`.
+    """
+
+    config_class = JoyNavModelConfig
+
+    def __init__(self, config):
+        # MRO: Interface.__init__ -> ABC (no __init__) -> JoyNav.__init__ -> Qwen3VLForConditionalGeneration.__init__
+        super().__init__(config)
+        # Ensure every patched attention starts with a clean rolling-rope buffer.
+        self._reset_dynamic_rope_state()
+
+    def _reset_dynamic_rope_state(self):
+        for _, module in self.model.named_modules():
+            if isinstance(module, Qwen3VLTextAttention):
+                module.past_position_embeddings = None
+
+    def forward(self, *args, **kwargs):
+        # A stale rolling buffer from a previous generation would corrupt
+        # training gradients, so clear it whenever we enter a fresh forward
+        # without an input cache.
+        if kwargs.get("past_key_values", None) is None:
+            self._reset_dynamic_rope_state()
+        return super().forward(*args, **kwargs)

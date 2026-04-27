@@ -1,7 +1,6 @@
 from typing import Dict, List, Optional, Sequence, Tuple, Callable
 
 import torch
-from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers import Trainer
 from transformers.cache_utils import Cache
@@ -92,6 +91,7 @@ def flash_attention_forward(
             ]
         ).item()
 
+    from flash_attn.flash_attn_interface import flash_attn_varlen_func
     attn_output = flash_attn_varlen_func(
         query,
         key,
