@@ -224,26 +224,40 @@ def preprocess_qwen_visual(
         input_ids = torch.tensor(input_ids).unsqueeze(0)
 
     labels = torch.full_like(input_ids, IGNORE_INDEX)
-
-    input_ids_flat = input_ids[0].tolist()
-    L = len(input_ids_flat)
-    pos = 0
-    while pos < L:
-        if input_ids_flat[pos] == 77091:
-            ans_start = pos + 2
-            ans_end = ans_start
-            while ans_end < L and input_ids_flat[ans_end] != 151645:
-                ans_end += 1
-            if ans_end < L:
-                labels[0, ans_start : ans_end + 2] = input_ids[
-                    0, ans_start : ans_end + 2
-                ]
-                pos = ans_end
-        pos += 1
+    labels = _mask_assistant_labels(input_ids, labels, processor.tokenizer)
 
     full_result["labels"] = labels
     full_result["input_ids"] = input_ids
     return full_result
+
+
+def _mask_assistant_labels(input_ids: torch.Tensor, labels: torch.Tensor, tokenizer) -> torch.Tensor:
+    im_start_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    assistant_ids = tokenizer.encode("assistant", add_special_tokens=False)
+    newline_ids = tokenizer.encode("\n", add_special_tokens=False)
+
+    for batch_idx, row in enumerate(input_ids.tolist()):
+        pos = 0
+        while pos < len(row):
+            role_start = pos + 1
+            role_end = role_start + len(assistant_ids)
+            if row[pos] == im_start_id and row[role_start:role_end] == assistant_ids:
+                ans_start = role_end
+                if row[ans_start : ans_start + len(newline_ids)] == newline_ids:
+                    ans_start += len(newline_ids)
+
+                ans_end = ans_start
+                while ans_end < len(row) and row[ans_end] != im_end_id:
+                    ans_end += 1
+                if ans_end < len(row):
+                    label_end = ans_end + 1
+                    if row[label_end : label_end + len(newline_ids)] == newline_ids:
+                        label_end += len(newline_ids)
+                    labels[batch_idx, ans_start:label_end] = input_ids[batch_idx, ans_start:label_end]
+                    pos = ans_end
+            pos += 1
+    return labels
 
 
 
@@ -272,6 +286,11 @@ class DataCollatorForSupervisedDataset(object):
             [instance[key] for instance in instances]
             for key in ("input_ids", "labels", "position_ids")
         )
+        mm_token_type_ids = [
+            instance["mm_token_type_ids"].squeeze(0)
+            for instance in instances
+            if "mm_token_type_ids" in instance
+        ]
         input_ids = [ids.squeeze(0) for ids in input_ids]
         labels = [ids.squeeze(0) for ids in labels]
         input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -289,6 +308,11 @@ class DataCollatorForSupervisedDataset(object):
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
+        if len(mm_token_type_ids) == len(instances):
+            mm_token_type_ids = torch.nn.utils.rnn.pad_sequence(
+                mm_token_type_ids, batch_first=True, padding_value=0
+            )
+            batch["mm_token_type_ids"] = mm_token_type_ids[:, : self.tokenizer.model_max_length]
         images = list(
             instance["pixel_values"]
             for instance in instances
@@ -342,6 +366,11 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
             [instance[key] for instance in instances]
             for key in ("input_ids", "labels", "position_ids", "attention_mask")
         )
+        mm_token_type_ids = [
+            instance["mm_token_type_ids"]
+            for instance in instances
+            if "mm_token_type_ids" in instance
+        ]
         attention_mask = list(
             itertools.chain(
                 *(
@@ -363,6 +392,8 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
             attention_mask=cumsum_seq_lens,
             position_ids=position_ids,
         )
+        if len(mm_token_type_ids) == len(instances):
+            batch["mm_token_type_ids"] = torch.cat(mm_token_type_ids, dim=1)
         images = list(
             instance["pixel_values"]
             for instance in instances
@@ -696,6 +727,15 @@ class LazySupervisedDataset(BaseDataset):
                 "position_ids": position_ids,
                 "attention_mask": attention_mask if attention_mask else None,
             }
+            if any("mm_token_type_ids" in d for d in data_list):
+                new_data_dict["mm_token_type_ids"] = torch.cat(
+                    [
+                        d["mm_token_type_ids"]
+                        for d in data_list
+                        if "mm_token_type_ids" in d
+                    ],
+                    dim=1,
+                )
 
             if any("pixel_values" in d for d in data_list):
                 new_data_dict.update(

@@ -141,7 +141,7 @@ def main() -> None:
     parser.add_argument(
         "json_file",
         nargs="?",
-        default="/mnt/nas5/xiangchen/vlacode/JD-VLN/results/r2r/val_unseen/qwen3_dyna_final_epoch1/result.json",
+        default="/mnt/nas5/xiangchen/vlacode/JD-VLN/results/r2r/val_unseen/qwen3_sf_dyna/result.json",
         help="Path to JoyNav result.json. Defaults to qwen3_dyna_final_epoch1 result.",
     )
     parser.add_argument(

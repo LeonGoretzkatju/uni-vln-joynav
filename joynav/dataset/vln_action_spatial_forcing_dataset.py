@@ -9,6 +9,23 @@ from .vln_action_dataset import VLNActionCollator, VLNActionDataset
 from .vln_action_dataset_args import VLNActionDatasetArguments
 
 
+def _round_to_multiple(value: int, multiple: int) -> int:
+    return max(multiple, int(round(value / multiple)) * multiple)
+
+
+def resize_image_to_qwen_grid(
+    image: Image.Image,
+    grid_thw: torch.Tensor,
+    patch_size: int,
+    teacher_patch_size: int = 14,
+) -> Image.Image:
+    _, grid_h, grid_w = [int(v) for v in grid_thw.tolist()]
+    resample = getattr(Image, "Resampling", Image).BICUBIC
+    width = _round_to_multiple(grid_w * patch_size, teacher_patch_size)
+    height = _round_to_multiple(grid_h * patch_size, teacher_patch_size)
+    return image.resize((width, height), resample)
+
+
 @dataclass
 class VLNActionSpatialForcingDatasetArguments(VLNActionDatasetArguments):
     spatial_forcing_image_size: int = field(
@@ -22,6 +39,7 @@ class VLNActionSpatialForcingDataset(VLNActionDataset):
 
     def __init__(self, processor, data_args: BaseDatasetArguments):
         self.spatial_forcing_image_size = data_args.spatial_forcing_image_size
+        self.spatial_forcing_patch_size = getattr(processor.image_processor, "patch_size", 16)
         self.spatial_forcing_transform = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -30,45 +48,34 @@ class VLNActionSpatialForcingDataset(VLNActionDataset):
         )
         super().__init__(processor, data_args)
 
-    def _resize_image(self, image: Image.Image) -> Image.Image:
-        resample = getattr(Image, "Resampling", Image).BICUBIC
-        width, height = image.size
-        scale = self.spatial_forcing_image_size / max(width, height)
-        resized_width = max(1, int(round(width * scale)))
-        resized_height = max(1, int(round(height * scale)))
-        image = image.resize((resized_width, resized_height), resample)
-        canvas = Image.new("RGB", (self.spatial_forcing_image_size, self.spatial_forcing_image_size), (255, 255, 255))
-        left = (self.spatial_forcing_image_size - resized_width) // 2
-        top = (self.spatial_forcing_image_size - resized_height) // 2
-        canvas.paste(image, (left, top))
-        return canvas
-
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
+        item = super()._get_item(sources)
         image_files = sources[0].get("image") or []
         if isinstance(image_files, str):
             image_files = [image_files]
 
+        image_grid_thw = item.get("image_grid_thw")
         sf_image_tensors = []
-        for image_path in image_files:
+        for image_path, grid_thw in zip(image_files, image_grid_thw):
             image = Image.open(image_path).convert("RGB")
-            image = self._resize_image(image)
+            image = resize_image_to_qwen_grid(image, grid_thw, self.spatial_forcing_patch_size)
             sf_image_tensors.append(self.spatial_forcing_transform(image))
 
-        item = super()._get_item(sources)
         if sf_image_tensors:
-            item["sf_image_tensors"] = torch.stack(sf_image_tensors, dim=0)
+            item["sf_image_tensors"] = sf_image_tensors
         return item
 
 
 class VLNActionSpatialForcingCollator(VLNActionCollator):
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        sf_image_tensors = None
+        sf_image_tensors = []
         if "sf_image_tensors" in instances[0]:
-            sf_image_tensors = [instance.pop("sf_image_tensors") for instance in instances]
+            for instance in instances:
+                sf_image_tensors.extend(instance.pop("sf_image_tensors"))
 
         batch = super().__call__(instances)
-        if sf_image_tensors is not None:
-            batch["sf_image_tensors"] = torch.cat(sf_image_tensors, dim=0)
+        if sf_image_tensors:
+            batch["sf_image_tensors"] = sf_image_tensors
         return batch
 
 

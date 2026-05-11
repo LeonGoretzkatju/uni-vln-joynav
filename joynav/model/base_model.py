@@ -43,6 +43,7 @@ class BaseModel(ABC):
     @classmethod
     def from_pretrained(self, pretrained_model_name_or_path: Optional[str] = None, **kwargs):
         model_args = kwargs.pop("model_args", None)
+        output_loading_info = kwargs.pop("output_loading_info", False)
         
         if model_args is not None:
             if "config" not in kwargs:
@@ -55,5 +56,12 @@ class BaseModel(ABC):
                 setattr(config, key, value)
             kwargs["config"] = config
         
-        model = super().from_pretrained(pretrained_model_name_or_path, **kwargs)
+        model, loading_info = super().from_pretrained(
+            pretrained_model_name_or_path,
+            output_loading_info=True,
+            **kwargs,
+        )
+        model._hf_loading_info = loading_info
+        if output_loading_info:
+            return model, loading_info
         return model

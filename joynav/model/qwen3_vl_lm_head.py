@@ -46,6 +46,7 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
+        mm_token_type_ids: Optional[torch.Tensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs,
@@ -69,8 +70,9 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
             if self.model.rope_deltas is None or past_key_values_length == 0:
                 position_ids, rope_deltas = self.model.get_rope_index(
                     input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
+                    mm_token_type_ids=mm_token_type_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
                     attention_mask=attention_mask,
                 )
                 self.model.rope_deltas = rope_deltas
@@ -79,8 +81,9 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
                 part_attention_mask = attention_mask[:,-input_ids.shape[1]:]
                 position_ids, rope_deltas = self.model.get_rope_index(
                     input_ids,
-                    image_grid_thw,
-                    video_grid_thw,
+                    mm_token_type_ids=mm_token_type_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
                     attention_mask=part_attention_mask,
                 )
                 delta = (past_key_values_length + self.model.rope_deltas).to(input_ids.device)
@@ -103,6 +106,7 @@ class JoyNav_Qwen3VLForCausalLM(BaseModel, Qwen3VLForConditionalGeneration):
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids,
             position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,

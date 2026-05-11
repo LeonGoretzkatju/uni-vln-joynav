@@ -70,6 +70,13 @@ class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
         self.__dict__["spatial_forcing_geometry_encoder"] = None
         self.__dict__["_sf_debug_forward_count"] = 0
 
+    def post_update_model(self):
+        loading_info = getattr(self, "_hf_loading_info", {})
+        missing_keys = loading_info.get("missing_keys", [])
+        missing_projector = any(key.startswith("spatial_forcing_projector.") for key in missing_keys)
+        if self.spatial_forcing_projector is not None and missing_projector:
+            self.spatial_forcing_projector.initialize_weights()
+
     def state_dict(self, *args, **kwargs):
         state_dict = super().state_dict(*args, **kwargs)
         if bool(getattr(self.config, "sf_save_geometry_encoder", False)):
@@ -80,25 +87,8 @@ class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
             if not key.startswith("spatial_forcing_geometry_encoder.")
         }
 
-    def _resolve_sf_layers(self) -> list[int]:
-        return parse_spatial_forcing_layers(
-            self.sf_align_layer_spec,
-            num_hidden_layers=len(self.model.language_model.layers),
-        )
-
-    def _register_spatial_forcing_hooks(self):
-        captured_hidden_states = {}
-        handles = []
-
-        def make_hook(layer_idx):
-            def hook(_module, _inputs, output):
-                captured_hidden_states[layer_idx] = output[0] if isinstance(output, tuple) else output
-
-            return hook
-
-        for layer_idx in sorted(set(self._resolve_sf_layers())):
-            handles.append(self.model.language_model.layers[layer_idx].register_forward_hook(make_hook(layer_idx)))
-        return captured_hidden_states, handles
+    def _resolve_sf_hidden_state_indices(self, num_hidden_states: int) -> list[int]:
+        return parse_spatial_forcing_layers(self.sf_align_layer_spec, num_hidden_layers=num_hidden_states)
 
     def _get_geometry_encoder(self, device: torch.device) -> DepthAnythingEncoder:
         if self.spatial_forcing_geometry_encoder is not None:
@@ -127,46 +117,70 @@ class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
 
     def _build_spatial_targets(
         self,
-        sf_image_tensors: torch.Tensor,
+        sf_image_tensors,
         image_grid_thw: torch.LongTensor,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        sf_image_tensors = sf_image_tensors.to(device=device)
-        if sf_image_tensors.dim() == 4:
-            sf_image_tensors = sf_image_tensors.unsqueeze(0)
-
         encoder = self._get_geometry_encoder(device)
-        with torch.no_grad():
-            da2_features = encoder.encode(sf_image_tensors).reshape(-1, sf_image_tensors.shape[-2] // 14 * (sf_image_tensors.shape[-1] // 14), self.sf_target_dim)
+        spatial_merge_size = getattr(self.config.vision_config, "spatial_merge_size", 2)
 
-        target_features = resize_spatial_features_to_grid(
-            da2_features.to(dtype=dtype),
-            source_hw=(sf_image_tensors.shape[-2] // 14, sf_image_tensors.shape[-1] // 14),
-            image_grid_thw=image_grid_thw.to(device),
-            spatial_merge_size=getattr(self.config.vision_config, "spatial_merge_size", 2),
-        )
+        if isinstance(sf_image_tensors, (list, tuple)):
+            targets = []
+            for image_tensor, grid_thw in zip(sf_image_tensors, image_grid_thw):
+                image_tensor = image_tensor.to(device=device)
+                if image_tensor.dim() == 3:
+                    image_tensor = image_tensor.unsqueeze(0).unsqueeze(0)
+                elif image_tensor.dim() == 4:
+                    image_tensor = image_tensor.unsqueeze(0)
+                source_hw = (image_tensor.shape[-2] // 14, image_tensor.shape[-1] // 14)
+                with torch.no_grad():
+                    da2_features = encoder.encode(image_tensor).reshape(1, source_hw[0] * source_hw[1], self.sf_target_dim)
+                targets.append(
+                    resize_spatial_features_to_grid(
+                        da2_features.to(dtype=dtype),
+                        source_hw=source_hw,
+                        image_grid_thw=grid_thw.to(device).unsqueeze(0),
+                        spatial_merge_size=spatial_merge_size,
+                    )
+                )
+            target_features = torch.cat(targets, dim=0)
+        else:
+            sf_image_tensors = sf_image_tensors.to(device=device)
+            if sf_image_tensors.dim() == 4:
+                sf_image_tensors = sf_image_tensors.unsqueeze(0)
+
+            with torch.no_grad():
+                source_hw = (sf_image_tensors.shape[-2] // 14, sf_image_tensors.shape[-1] // 14)
+                da2_features = encoder.encode(sf_image_tensors).reshape(-1, source_hw[0] * source_hw[1], self.sf_target_dim)
+
+            target_features = resize_spatial_features_to_grid(
+                da2_features.to(dtype=dtype),
+                source_hw=source_hw,
+                image_grid_thw=image_grid_thw.to(device),
+                spatial_merge_size=spatial_merge_size,
+            )
         if self.sf_add_pos_embed:
             target_features = add_spatial_positional_embedding(
                 target_features,
                 image_grid_thw=image_grid_thw.to(device),
-                spatial_merge_size=getattr(self.config.vision_config, "spatial_merge_size", 2),
+                spatial_merge_size=spatial_merge_size,
             )
         return target_features
 
     def _compute_spatial_forcing_loss(
         self,
-        captured_hidden_states: dict[int, torch.Tensor],
+        hidden_states: tuple[torch.Tensor, ...],
         input_ids: torch.LongTensor,
         image_grid_thw: torch.LongTensor,
-        sf_image_tensors: torch.Tensor,
+        sf_image_tensors,
     ) -> torch.Tensor:
         image_mask = input_ids == self.config.image_token_id
         visual_token_count = int(image_mask.sum().item())
         if visual_token_count == 0:
             return next(self.spatial_forcing_projector.parameters()).sum() * 0.0
 
-        first_hidden = next(iter(captured_hidden_states.values()))
+        first_hidden = hidden_states[-1]
         target_features = self._build_spatial_targets(
             sf_image_tensors=sf_image_tensors,
             image_grid_thw=image_grid_thw,
@@ -180,8 +194,8 @@ class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
             )
 
         losses = []
-        for layer_idx in self._resolve_sf_layers():
-            visual_tokens = captured_hidden_states[layer_idx][image_mask]
+        for layer_idx in self._resolve_sf_hidden_state_indices(len(hidden_states)):
+            visual_tokens = hidden_states[layer_idx][image_mask]
             projected_tokens = self.spatial_forcing_projector(visual_tokens)
             losses.append(cosine_alignment_loss(projected_tokens, target_features))
         return torch.stack(losses).mean()
@@ -212,34 +226,29 @@ class JoyNav_Qwen3VLSpatialForcingForCausalLM(JoyNav_Qwen3VLForCausalLM):
             and input_ids is not None
         )
 
-        captured_hidden_states, handles = ({}, [])
         if use_spatial_forcing:
-            captured_hidden_states, handles = self._register_spatial_forcing_hooks()
+            kwargs["output_hidden_states"] = True
 
-        try:
-            outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                cache_position=cache_position,
-                logits_to_keep=logits_to_keep,
-                **kwargs,
-            )
-        finally:
-            for handle in handles:
-                handle.remove()
+        outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            cache_position=cache_position,
+            logits_to_keep=logits_to_keep,
+            **kwargs,
+        )
 
         spatial_forcing_loss = None
         if use_spatial_forcing:
             spatial_forcing_loss = self._compute_spatial_forcing_loss(
-                captured_hidden_states=captured_hidden_states,
+                hidden_states=outputs.hidden_states,
                 input_ids=input_ids,
                 image_grid_thw=image_grid_thw,
                 sf_image_tensors=sf_image_tensors,

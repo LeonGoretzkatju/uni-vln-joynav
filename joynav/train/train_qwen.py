@@ -115,6 +115,26 @@ def set_model(model_args, model):
         model.lm_head.requires_grad = False
 
 
+def print_trainable_parameters(module):
+    if hasattr(module, "print_trainable_parameters"):
+        module.print_trainable_parameters()
+        return
+
+    trainable_params = 0
+    all_param = 0
+    for _, param in module.named_parameters():
+        num_params = param.numel()
+        all_param += num_params
+        if param.requires_grad:
+            trainable_params += num_params
+    trainable_percent = 100 * trainable_params / all_param if all_param else 0
+    print(
+        f"trainable params: {trainable_params:,} || "
+        f"all params: {all_param:,} || "
+        f"trainable%: {trainable_percent:.4f}"
+    )
+
+
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
@@ -164,7 +184,9 @@ def train(attn_implementation="flash_attention_2"):
         rank0_print("LoRA applied. Trainable parameters:")
         model.print_trainable_parameters()
 
-    if "qwen3_vl" in data_args.model_type:
+    if "qwen3_5" in data_args.model_type:
+        data_args.model_type = "qwen3vl"
+    elif "qwen3_vl" in data_args.model_type:
         data_args.model_type = "qwen3vl"
     elif "qwen2_5_vl" in data_args.model_type:
         data_args.model_type = "qwen2.5vl"
@@ -211,8 +233,8 @@ def train(attn_implementation="flash_attention_2"):
         if model_args.use_lora:
             model.print_trainable_parameters()
         else:
-            model.visual.print_trainable_parameters()
-            model.model.print_trainable_parameters()
+            print_trainable_parameters(model.visual)
+            print_trainable_parameters(model.model)
     
     trainer = Trainer(
         model=model, processing_class=processor, args=training_args, **data_module

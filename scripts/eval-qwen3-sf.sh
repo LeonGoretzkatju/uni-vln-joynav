@@ -18,13 +18,13 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2}
 
 MODEL_TYPE=${MODEL_TYPE:-qwen3_vl_lm_head_sf_dyna}
 EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_vl_lm_head_sf_dyna}
-MODEL_PATH=${MODEL_PATH:-/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_vl_2b_full_sf/stage1-r2r+rxr-sf_alpha_0.1-layers_24-lr_2e-5-mm_lr_1e-6-batch_size_1-grad_accum_steps_8-epochs_1-max_pixels_451584}
+MODEL_PATH=${MODEL_PATH:-/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_vl_2b_full_sf_4090/stage1-r2r+rxr-sf_alpha_0.1-layers_24-lr_2e-5-mm_lr_1e-6-batch_size_1-grad_accum_steps_8-epochs_1-max_pixels_451584/checkpoint-5921}
 OUTPUT_PATH=${OUTPUT_PATH:-results/r2r/val_unseen/qwen3_sf_dyna}
 
 HABITAT_CONFIG_PATH=${HABITAT_CONFIG_PATH:-configs/vln_r2r.yaml}
 EVAL_SPLIT=${EVAL_SPLIT:-val_unseen}
 MAX_PIXELS=${MAX_PIXELS:-451584}
-ACTION_CHUNK_NUM=${ACTION_CHUNK_NUM:-8}
+ACTION_CHUNK_NUM=${ACTION_CHUNK_NUM:-4}
 LIMIT=${LIMIT:-0}
 USE_CACHE=${USE_CACHE:-1}
 SAVE_VIDEO=${SAVE_VIDEO:-0}

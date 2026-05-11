@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import math
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -148,32 +147,25 @@ def add_spatial_positional_embedding(
 
 
 class SpatialForcingProjector(nn.Module):
-    """BatchNorm + two-layer MLP used to project VLA visual tokens to DA2 space."""
+    """Two-layer MLP used to project VLA visual tokens to geometry-feature space."""
 
     def __init__(self, input_dim: int, target_dim: int, hidden_dim: Optional[int] = None):
         super().__init__()
         hidden_dim = hidden_dim or target_dim * 2
-        self.batch_norm = nn.BatchNorm1d(input_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, target_dim),
-        )
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden_dim, target_dim)
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        for module in (self.fc1, self.fc2):
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
 
     def forward(self, visual_tokens: torch.Tensor) -> torch.Tensor:
         original_shape = visual_tokens.shape
-        visual_tokens = visual_tokens.reshape(-1, original_shape[-1])
-        if self.training and visual_tokens.shape[0] <= 1:
-            visual_tokens = F.batch_norm(
-                visual_tokens,
-                self.batch_norm.running_mean,
-                self.batch_norm.running_var,
-                self.batch_norm.weight,
-                self.batch_norm.bias,
-                training=False,
-                eps=self.batch_norm.eps,
-            )
-        else:
-            visual_tokens = self.batch_norm(visual_tokens)
-        visual_tokens = self.mlp(visual_tokens)
-        return visual_tokens.reshape(*original_shape[:-1], -1)
+        visual_tokens = visual_tokens.reshape(-1, original_shape[-1]).to(self.fc1.weight.dtype)
+        visual_tokens = self.fc1(visual_tokens)
+        visual_tokens = self.act(visual_tokens)
+        visual_tokens = self.fc2(visual_tokens)
+        return visual_tokens.reshape(*original_shape[:-1], -1).float()
