@@ -2,6 +2,7 @@
 
 from .base import BaseGeometryEncoder, GeometryEncoderConfig
 from .depth_anything_encoder import DepthAnythingEncoder
+from .vggt_omega_encoder import VGGTOmegaEncoder
 
 try:
     from .vggt_encoder import VGGTEncoder
@@ -48,5 +49,7 @@ def create_geometry_encoder(config) -> BaseGeometryEncoder:
         return DA3Encoder(config)
     elif encoder_type == "da2":
         return DepthAnythingEncoder(config)
+    elif encoder_type == "vggt_omega":
+        return VGGTOmegaEncoder(config)
     else:
         raise ValueError(f"Unknown geometry encoder type: {encoder_type}")

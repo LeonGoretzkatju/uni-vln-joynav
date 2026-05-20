@@ -40,6 +40,10 @@ class Qwen35SupportTest(unittest.TestCase):
             get_component("model", "qwen3_5_lm_head_sf").__name__,
             "JoyNav_Qwen3_5SpatialForcingForCausalLM",
         )
+        self.assertEqual(
+            get_component("model", "qwen3_5_lm_head_sf_omega").__name__,
+            "JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM",
+        )
 
     def test_qwen3_5_action_script_contract(self):
         text = Path("scripts/single-qwen3_5-0_8b.sh").read_text()
@@ -64,6 +68,20 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertIn("--sf_align_layers=${sf_align_layers}", text)
         self.assertIn("sf_align_layers=${SF_ALIGN_LAYERS:-18}", text)
         self.assertIn("--spatial_forcing_image_size 518", text)
+
+    def test_qwen3_5_omega_spatial_forcing_script_contract(self):
+        text = Path("scripts/single-qwen3_5-0_8b-sf-omega.sh").read_text()
+
+        self.assertIn("conda activate ${CONDA_ENV:-qwenvln}", text)
+        self.assertIn("model_type=qwen3_5_lm_head_sf_omega", text)
+        self.assertIn("dataset_type=vln_action_sf_omega", text)
+        self.assertIn(
+            "vggt_omega_1b_512.pt",
+            text,
+        )
+        self.assertIn("--sf_target_dim 2048", text)
+        self.assertIn("--sf_teacher_layers=${sf_teacher_layers}", text)
+        self.assertIn("--spatial_forcing_teacher_patch_size 16", text)
 
     def test_qwen3_5_preprocess_keeps_mm_token_type_ids(self):
         processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
@@ -90,6 +108,36 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertEqual(resized.size[0] % 14, 0)
         self.assertEqual(resized.size[1] % 14, 0)
         self.assertLess(abs((resized.size[0] / resized.size[1]) - (640 / 480)), 0.03)
+
+    def test_omega_teacher_resize_uses_patch_size_16(self):
+        image = Image.new("RGB", (640, 480), (255, 0, 0))
+        grid_thw = torch.tensor([1, 30, 40])
+
+        resized = resize_image_to_qwen_grid(image, grid_thw, patch_size=16, teacher_patch_size=16)
+
+        self.assertEqual(resized.size, (640, 480))
+        self.assertEqual(resized.size[0] % 16, 0)
+        self.assertEqual(resized.size[1] % 16, 0)
+
+    def test_vggt_omega_patch_token_selection_shape(self):
+        from joynav.model.geometry_encoder.vggt_omega_encoder import select_vggt_omega_patch_tokens
+
+        cached_tokens = [None] * 24
+        cached_tokens[23] = torch.randn(1, 2, 17 + 12, 2048)
+
+        patch_tokens = select_vggt_omega_patch_tokens(
+            aggregated_tokens_list=cached_tokens,
+            patch_token_start=17,
+            teacher_layer_spec="23",
+            source_hw=(3, 4),
+        )
+
+        self.assertEqual(patch_tokens.shape, (2, 12, 2048))
+
+    def test_vggt_omega_package_is_vendored(self):
+        from vggt_omega.models.aggregator import Aggregator
+
+        self.assertEqual(Aggregator.__name__, "Aggregator")
 
     def test_spatial_forcing_uses_hidden_states_not_forward_hooks(self):
         for path in [
