@@ -35,15 +35,16 @@ max_pixels=${MAX_PIXELS:-200704}
 sf_alpha=${SF_ALPHA:-0.1}
 sf_align_layers=${SF_ALIGN_LAYERS:-18}
 sf_teacher_layers=${SF_TEACHER_LAYERS:-23}
+spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-512}
 max_steps=${MAX_STEPS:-"-1"}
 model_max_length=${MODEL_MAX_LENGTH:-163840}
 precision_arg=${PRECISION_ARG:-"--fp16"}
 logging_steps=${LOGGING_STEPS:-10}
 gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,2,3}}
 
-num_frames=${NUM_FRAMES:-16}
+num_frames=${NUM_FRAMES:-8}
 num_history=${NUM_HISTORY:-4}
-action_chunk_num=${ACTION_CHUNK_NUM:-4}
+action_chunk_num=${ACTION_CHUNK_NUM:-2}
 
 if [ "${max_steps}" != "-1" ]; then
   save_strategy=${SAVE_STRATEGY:-"no"}
@@ -88,6 +89,7 @@ args="
     --sf_target_dim 2048 \
     --sf_add_pos_embed False \
     --spatial_forcing_teacher_patch_size 16 \
+    --spatial_forcing_image_resolution ${spatial_forcing_image_resolution} \
     ${precision_arg} \
     --output_dir ${output_dir} \
     --num_train_epochs ${num_train_epochs} \

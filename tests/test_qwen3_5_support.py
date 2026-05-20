@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 from PIL import Image
@@ -82,6 +83,8 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertIn("--sf_target_dim 2048", text)
         self.assertIn("--sf_teacher_layers=${sf_teacher_layers}", text)
         self.assertIn("--spatial_forcing_teacher_patch_size 16", text)
+        self.assertIn("spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-512}", text)
+        self.assertIn("--spatial_forcing_image_resolution ${spatial_forcing_image_resolution}", text)
 
     def test_qwen3_5_preprocess_keeps_mm_token_type_ids(self):
         processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
@@ -118,6 +121,17 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertEqual(resized.size, (640, 480))
         self.assertEqual(resized.size[0] % 16, 0)
         self.assertEqual(resized.size[1] % 16, 0)
+
+    def test_vggt_omega_balanced_512_preprocess_shape(self):
+        from vggt_omega.utils.load_fn import load_and_preprocess_images
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "image.jpg"
+            Image.new("RGB", (640, 480), (255, 0, 0)).save(image_path)
+
+            images = load_and_preprocess_images([str(image_path)], image_resolution=512, patch_size=16)
+
+        self.assertEqual(images.shape, (1, 3, 448, 592))
 
     def test_vggt_omega_patch_token_selection_shape(self):
         from joynav.model.geometry_encoder.vggt_omega_encoder import select_vggt_omega_patch_tokens
