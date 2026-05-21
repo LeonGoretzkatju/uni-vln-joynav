@@ -135,6 +135,45 @@ def print_trainable_parameters(module):
     )
 
 
+def promote_trainable_parameters_to_fp32(module):
+    for param in module.parameters():
+        if param.requires_grad and param.dtype in (torch.float16, torch.bfloat16):
+            param.data = param.data.float()
+
+
+def set_model_use_cache(model, use_cache: bool):
+    config = getattr(model, "config", None)
+    if config is None:
+        return
+
+    config.use_cache = use_cache
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        text_config.use_cache = use_cache
+
+
+def resolve_model_load_dtype(training_args, model_args):
+    requested_dtype = str(getattr(model_args, "model_load_dtype", "auto")).lower()
+    dtype_map = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+    }
+    if requested_dtype != "auto":
+        if requested_dtype not in dtype_map:
+            raise ValueError(f"Unsupported model_load_dtype: {requested_dtype}")
+        return dtype_map[requested_dtype]
+
+    if training_args.bf16 and (
+        getattr(model_args, "use_lora", False) or not getattr(model_args, "tune_mm_llm", False)
+    ):
+        return torch.bfloat16
+    return torch.float32
+
+
 def train(attn_implementation="flash_attention_2"):
     global local_rank
 
@@ -150,7 +189,7 @@ def train(attn_implementation="flash_attention_2"):
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
         attn_implementation=attn_implementation,
-        dtype=(torch.bfloat16 if training_args.bf16 else None),
+        dtype=resolve_model_load_dtype(training_args, model_args),
         model_args=model_args
     )
     model.post_update_model()
@@ -204,7 +243,7 @@ def train(attn_implementation="flash_attention_2"):
 
     if data_args.data_flatten or data_args.data_packing:
         replace_qwen2_vl_attention_class()
-    model.config.use_cache = False
+    set_model_use_cache(model, False)
 
     if training_args.gradient_checkpointing:
         if hasattr(model, "enable_input_require_grads"):
@@ -229,6 +268,8 @@ def train(attn_implementation="flash_attention_2"):
     if not model_args.use_lora:
         set_model(model_args, model)
 
+    promote_trainable_parameters_to_fp32(model)
+
     if torch.distributed.get_rank() == 0:
         if model_args.use_lora:
             model.print_trainable_parameters()
@@ -248,7 +289,7 @@ def train(attn_implementation="flash_attention_2"):
     trainer.save_state()
     processor.save_pretrained(training_args.output_dir)
 
-    model.config.use_cache = True
+    set_model_use_cache(model, True)
 
     safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
 

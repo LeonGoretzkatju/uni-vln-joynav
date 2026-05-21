@@ -43,6 +43,8 @@ def cosine_alignment_loss(
             f"got {tuple(projected_tokens.shape)} and {tuple(target_tokens.shape)}"
         )
 
+    projected_tokens = projected_tokens.float()
+    target_tokens = target_tokens.float()
     projected_tokens = F.normalize(projected_tokens, dim=-1, eps=eps)
     target_tokens = F.normalize(target_tokens, dim=-1, eps=eps)
     loss = 1.0 - (projected_tokens * target_tokens).sum(dim=-1)

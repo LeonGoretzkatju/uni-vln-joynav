@@ -4,6 +4,8 @@ set -euo pipefail
 eval "$(conda shell.bash hook 2>/dev/null)"
 conda activate ${CONDA_ENV:-qwenvln}
 
+pip install flash_attn-2.7.3+cu11torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+
 export TOKENIZERS_PARALLELISM=false
 export JOYNAV_SF_DEBUG=${JOYNAV_SF_DEBUG:-0}
 export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-0}
@@ -22,29 +24,47 @@ deepspeed=${DEEPSPEED_CONFIG:-./scripts/zero2.json}
 llm=${MODEL_PATH:-/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B}
 model_type=qwen3_5_lm_head_sf_omega
 dataset_type=vln_action_sf_omega
-sf_geometry_encoder_path=${SF_GEOMETRY_ENCODER_PATH:-/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_512.pt}
+omega_mode=${OMEGA_MODE:-text_align}
 
-lr=${LR:-2e-5}
+case "${omega_mode}" in
+  512_1b)
+    default_sf_geometry_encoder_path=/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_512.pt
+    default_spatial_forcing_image_resolution=512
+    ;;
+  text_align)
+    default_sf_geometry_encoder_path=/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_256_text.pt
+    default_spatial_forcing_image_resolution=256
+    ;;
+  *)
+    echo "Unsupported OMEGA_MODE: ${omega_mode}. Use 512_1b or text_align." >&2
+    exit 1
+    ;;
+esac
+
+sf_geometry_encoder_path=${SF_GEOMETRY_ENCODER_PATH:-${default_sf_geometry_encoder_path}}
+
+lr=${LR:-5e-6}
 mm_projector_lr=${MM_PROJECTOR_LR:-1e-6}
 batch_size=${BATCH_SIZE:-1}
-num_train_epochs=${NUM_TRAIN_EPOCHS:-1}
-grad_accum_steps=${GRAD_ACCUM_STEPS:-8}
+num_train_epochs=${NUM_TRAIN_EPOCHS:-2}
+grad_accum_steps=${GRAD_ACCUM_STEPS:-1}
 weight_decay=${WEIGHT_DECAY:-0.01}
 warmup_ratio=${WARMUP_RATIO:-0.03}
 max_pixels=${MAX_PIXELS:-200704}
 sf_alpha=${SF_ALPHA:-0.1}
 sf_align_layers=${SF_ALIGN_LAYERS:-18}
 sf_teacher_layers=${SF_TEACHER_LAYERS:-23}
-spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-512}
+spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-${default_spatial_forcing_image_resolution}}
 max_steps=${MAX_STEPS:-"-1"}
 model_max_length=${MODEL_MAX_LENGTH:-163840}
-precision_arg=${PRECISION_ARG:-"--fp16"}
+precision_arg=${PRECISION_ARG:-"--bf16"}
 logging_steps=${LOGGING_STEPS:-10}
+logging_nan_inf_filter=${LOGGING_NAN_INF_FILTER:-False}
 gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,2,3}}
 
-num_frames=${NUM_FRAMES:-8}
-num_history=${NUM_HISTORY:-4}
-action_chunk_num=${ACTION_CHUNK_NUM:-2}
+num_frames=${NUM_FRAMES:-24}
+num_history=${NUM_HISTORY:-6}
+action_chunk_num=${ACTION_CHUNK_NUM:-4}
 
 if [ "${max_steps}" != "-1" ]; then
   save_strategy=${SAVE_STRATEGY:-"no"}
@@ -56,7 +76,7 @@ save_steps=${SAVE_STEPS:-2000}
 entry_file=joynav/train/train_qwen.py
 datasets=${DATASETS:-"/mnt/nas5/xiangchen/VLNData/R2R,/mnt/nas5/xiangchen/VLNData/RxR"}
 
-run_name=${RUN_NAME:-"qwen3_5_0_8b_full_sf_omega"}
+run_name=${RUN_NAME:-"qwen3_5_0_8b_full_sf_omega_fp"}
 output_dir=${OUTPUT_DIR:-./outputs/${run_name}/stage1-r2r+rxr-omega_sf_alpha_${sf_alpha}-layers_${sf_align_layers}-teacher_${sf_teacher_layers}-lr_${lr}-mm_lr_${mm_projector_lr}-batch_size_${batch_size}-grad_accum_steps_${grad_accum_steps}-epochs_${num_train_epochs}-max_pixels_${max_pixels}}
 if [ "${max_steps}" != "-1" ]; then
   output_dir=${output_dir}-validate_max_steps_${max_steps}-port_${MASTER_PORT}
@@ -85,6 +105,7 @@ args="
     --sf_alpha ${sf_alpha} \
     --sf_align_layers=${sf_align_layers} \
     --sf_teacher_layers=${sf_teacher_layers} \
+    --omega_mode ${omega_mode} \
     --sf_geometry_encoder_path ${sf_geometry_encoder_path} \
     --sf_target_dim 2048 \
     --sf_add_pos_embed False \
@@ -110,10 +131,11 @@ args="
     --max_grad_norm 1 \
     --lr_scheduler_type cosine \
     --logging_steps ${logging_steps} \
+    --logging_nan_inf_filter ${logging_nan_inf_filter} \
     --model_max_length ${model_max_length} \
     --gradient_checkpointing True \
     --ddp_timeout 7200 \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers 3 \
     --run_name ${run_name} \
     --report_to tensorboard"
 

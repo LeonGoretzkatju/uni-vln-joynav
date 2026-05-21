@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import torch
 
 from .geometry_encoder import GeometryEncoderConfig
-from .geometry_encoder.vggt_omega_encoder import DEFAULT_VGGT_OMEGA_CHECKPOINT, VGGTOmegaEncoder
+from .geometry_encoder.vggt_omega_encoder import VGGTOmegaEncoder, resolve_vggt_omega_mode
 from .qwen3_5_lm_head_sf import (
     JoyNav_Qwen3_5SpatialForcingArguments,
     JoyNav_Qwen3_5SpatialForcingForCausalLM,
@@ -14,12 +14,13 @@ from .spatial_forcing import add_spatial_positional_embedding, resize_spatial_fe
 @dataclass
 class JoyNav_Qwen3_5OmegaSpatialForcingArguments(JoyNav_Qwen3_5SpatialForcingArguments):
     sf_geometry_encoder_path: str = field(
-        default=DEFAULT_VGGT_OMEGA_CHECKPOINT,
-        metadata={"help": "VGGT-Omega 512 checkpoint used as frozen Spatial Forcing teacher."},
+        default="",
+        metadata={"help": "Optional VGGT-Omega checkpoint override. Defaults depend on omega_mode."},
     )
     sf_target_dim: int = field(default=2048, metadata={"help": "VGGT-Omega cached patch token dimension."})
     sf_teacher_layers: str = field(default="23", metadata={"help": "Cached VGGT-Omega aggregator layers to align."})
     sf_add_pos_embed: bool = field(default=False)
+    omega_mode: str = field(default="512_1b", metadata={"help": "VGGT-Omega mode: 512_1b or text_align."})
 
 
 class JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM(JoyNav_Qwen3_5SpatialForcingForCausalLM):
@@ -28,6 +29,7 @@ class JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM(JoyNav_Qwen3_5SpatialForcingF
     def __init__(self, config):
         super().__init__(config)
         self.sf_teacher_layers = str(getattr(config, "sf_teacher_layers", "23"))
+        self.omega_mode = str(getattr(config, "omega_mode", "512_1b"))
 
     def _get_geometry_encoder(self, device: torch.device) -> VGGTOmegaEncoder:
         if self.spatial_forcing_geometry_encoder is not None:
@@ -35,13 +37,17 @@ class JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM(JoyNav_Qwen3_5SpatialForcingF
 
         encoder_config = GeometryEncoderConfig(
             encoder_type="vggt_omega",
-            model_path=getattr(self.config, "sf_geometry_encoder_path", DEFAULT_VGGT_OMEGA_CHECKPOINT),
+            model_path=resolve_vggt_omega_mode(
+                self.omega_mode,
+                getattr(self.config, "sf_geometry_encoder_path", ""),
+            ).checkpoint_path,
             freeze_encoder=True,
             out_hidden_size=self.sf_target_dim,
             encoder_kwargs={
                 "patch_size": 16,
                 "embed_dim": self.sf_target_dim // 2,
                 "teacher_layers": self.sf_teacher_layers,
+                "omega_mode": self.omega_mode,
             },
         )
         encoder = VGGTOmegaEncoder(encoder_config).to(device)

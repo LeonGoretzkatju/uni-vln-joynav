@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
@@ -14,6 +15,36 @@ from ..spatial_forcing import parse_spatial_forcing_layers
 DEFAULT_VGGT_OMEGA_CHECKPOINT = (
     "/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_512.pt"
 )
+DEFAULT_VGGT_OMEGA_TEXT_ALIGN_CHECKPOINT = (
+    "/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_256_text.pt"
+)
+
+
+@dataclass(frozen=True)
+class VGGTOmegaModeConfig:
+    checkpoint_path: str
+    image_resolution: int
+    enable_alignment: bool
+
+
+def resolve_vggt_omega_mode(
+    omega_mode: str,
+    checkpoint_path: str = "",
+    image_resolution: Optional[int] = None,
+) -> VGGTOmegaModeConfig:
+    if omega_mode == "512_1b":
+        return VGGTOmegaModeConfig(
+            checkpoint_path=checkpoint_path or DEFAULT_VGGT_OMEGA_CHECKPOINT,
+            image_resolution=image_resolution or 512,
+            enable_alignment=False,
+        )
+    if omega_mode == "text_align":
+        return VGGTOmegaModeConfig(
+            checkpoint_path=checkpoint_path or DEFAULT_VGGT_OMEGA_TEXT_ALIGN_CHECKPOINT,
+            image_resolution=image_resolution or 256,
+            enable_alignment=True,
+        )
+    raise ValueError(f"Unsupported omega_mode: {omega_mode}")
 
 
 def select_vggt_omega_patch_tokens(
@@ -56,9 +87,11 @@ class VGGTOmegaEncoder(BaseGeometryEncoder):
         self.patch_size = int(config.encoder_kwargs.get("patch_size", 16))
         self.embed_dim = int(config.encoder_kwargs.get("embed_dim", 1024))
         self.default_teacher_layers = str(config.encoder_kwargs.get("teacher_layers", "23"))
+        self.omega_mode = str(config.encoder_kwargs.get("omega_mode", "512_1b"))
+        self.mode_config = resolve_vggt_omega_mode(self.omega_mode, config.model_path or "")
         self.aggregator = Aggregator(patch_size=self.patch_size, embed_dim=self.embed_dim)
 
-        self.load_model(config.model_path or DEFAULT_VGGT_OMEGA_CHECKPOINT)
+        self.load_model(self.mode_config.checkpoint_path)
         self.aggregator.eval()
         if self.freeze_encoder:
             for param in self.aggregator.parameters():
@@ -66,6 +99,15 @@ class VGGTOmegaEncoder(BaseGeometryEncoder):
 
     def load_model(self, model_path: str) -> None:
         state_dict = torch.load(model_path, map_location="cpu")
+        if self.mode_config.enable_alignment:
+            from vggt_omega.models import VGGTOmega
+
+            model = VGGTOmega(enable_alignment=True)
+            model.load_state_dict(state_dict)
+            self.aggregator = model.aggregator
+            del model, state_dict
+            return
+
         aggregator_state = {
             key.removeprefix("aggregator."): value
             for key, value in state_dict.items()

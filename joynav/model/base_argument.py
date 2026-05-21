@@ -11,6 +11,10 @@ class BaseArguments:
     tune_mm_llm: bool = field(default=False, metadata={"help": "Whether to fine-tune the multi-modal LLM"})
     tune_mm_mlp: bool = field(default=False, metadata={"help": "Whether to fine-tune the multi-modal MLP"})
     tune_mm_vision: bool = field(default=False, metadata={"help": "Whether to fine-tune the multi-modal vision encoder"})
+    model_load_dtype: str = field(
+        default="auto",
+        metadata={"help": "Model weight loading dtype: auto, float32, bfloat16, or float16."},
+    )
 
     # LoRA arguments
     use_lora: bool = field(default=False, metadata={"help": "Whether to use LoRA for parameter-efficient fine-tuning"})

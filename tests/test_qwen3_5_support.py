@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path
 import sys
 import tempfile
@@ -76,14 +77,25 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertIn("conda activate ${CONDA_ENV:-qwenvln}", text)
         self.assertIn("model_type=qwen3_5_lm_head_sf_omega", text)
         self.assertIn("dataset_type=vln_action_sf_omega", text)
+        self.assertIn("omega_mode=${OMEGA_MODE:-text_align}", text)
+        self.assertIn("text_align)", text)
         self.assertIn(
             "vggt_omega_1b_512.pt",
             text,
         )
+        self.assertIn("vggt_omega_1b_256_text.pt", text)
         self.assertIn("--sf_target_dim 2048", text)
         self.assertIn("--sf_teacher_layers=${sf_teacher_layers}", text)
+        self.assertIn("--omega_mode ${omega_mode}", text)
+        self.assertNotIn("--model_load_dtype", text)
+        self.assertIn("gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,2,3}}", text)
+        self.assertIn("logging_nan_inf_filter=${LOGGING_NAN_INF_FILTER:-False}", text)
+        self.assertIn("--logging_nan_inf_filter ${logging_nan_inf_filter}", text)
         self.assertIn("--spatial_forcing_teacher_patch_size 16", text)
-        self.assertIn("spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-512}", text)
+        self.assertIn(
+            "spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-${default_spatial_forcing_image_resolution}}",
+            text,
+        )
         self.assertIn("--spatial_forcing_image_resolution ${spatial_forcing_image_resolution}", text)
 
     def test_qwen3_5_preprocess_keeps_mm_token_type_ids(self):
@@ -133,6 +145,30 @@ class Qwen35SupportTest(unittest.TestCase):
 
         self.assertEqual(images.shape, (1, 3, 448, 592))
 
+    def test_vggt_omega_balanced_256_preprocess_shape(self):
+        from vggt_omega.utils.load_fn import load_and_preprocess_images
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "image.jpg"
+            Image.new("RGB", (640, 480), (255, 0, 0)).save(image_path)
+
+            images = load_and_preprocess_images([str(image_path)], image_resolution=256, patch_size=16)
+
+        self.assertEqual(images.shape, (1, 3, 224, 288))
+
+    def test_vggt_omega_mode_config(self):
+        from joynav.model.geometry_encoder.vggt_omega_encoder import resolve_vggt_omega_mode
+
+        mode_512 = resolve_vggt_omega_mode("512_1b")
+        mode_text = resolve_vggt_omega_mode("text_align")
+
+        self.assertEqual(mode_512.image_resolution, 512)
+        self.assertFalse(mode_512.enable_alignment)
+        self.assertTrue(mode_512.checkpoint_path.endswith("vggt_omega_1b_512.pt"))
+        self.assertEqual(mode_text.image_resolution, 256)
+        self.assertTrue(mode_text.enable_alignment)
+        self.assertTrue(mode_text.checkpoint_path.endswith("vggt_omega_1b_256_text.pt"))
+
     def test_vggt_omega_patch_token_selection_shape(self):
         from joynav.model.geometry_encoder.vggt_omega_encoder import select_vggt_omega_patch_tokens
 
@@ -162,6 +198,24 @@ class Qwen35SupportTest(unittest.TestCase):
             self.assertNotIn("register_forward_hook", text)
             self.assertIn("output_hidden_states", text)
 
+    def test_qwen3_wrappers_do_not_claim_loss_kwargs_support(self):
+        import joynav.model  # noqa: F401
+
+        def trainer_accepts_loss_kwargs(model_cls):
+            if hasattr(model_cls, "accepts_loss_kwargs"):
+                return model_cls.accepts_loss_kwargs
+            parameters = inspect.signature(model_cls.forward).parameters.values()
+            return any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+        for model_type in [
+            "qwen3_5_lm_head",
+            "qwen3_5_lm_head_sf",
+            "qwen3_5_lm_head_sf_omega",
+            "qwen3_vl_lm_head",
+            "qwen3_vl_lm_head_sf",
+        ]:
+            self.assertFalse(trainer_accepts_loss_kwargs(get_component("model", model_type)))
+
     def test_spatial_forcing_projector_maps_visual_dim_to_depth_dim(self):
         projector = SpatialForcingProjector(input_dim=1024, target_dim=768, hidden_dim=1536)
         visual_tokens = torch.randn(2, 5, 1024)
@@ -173,12 +227,66 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertEqual(projected_tokens.shape, target_tokens.shape)
         self.assertTrue(torch.isfinite(loss))
 
+    def test_spatial_forcing_cosine_loss_upcasts_low_precision_inputs(self):
+        projected_tokens = torch.randn(2, 5, 32, dtype=torch.bfloat16)
+        target_tokens = torch.randn(2, 5, 32, dtype=torch.bfloat16)
+
+        loss = cosine_alignment_loss(projected_tokens, target_tokens)
+
+        self.assertEqual(loss.dtype, torch.float32)
+        self.assertTrue(torch.isfinite(loss))
+
     def test_trainable_parameter_printer_supports_plain_torch_modules(self):
         sys.path.insert(0, str(Path("joynav/train").resolve()))
         from joynav.train.train_qwen import print_trainable_parameters
 
         module = torch.nn.Linear(2, 1)
         print_trainable_parameters(module)
+
+    def test_full_finetune_loads_weights_in_fp32_under_bf16_training(self):
+        sys.path.insert(0, str(Path("joynav/train").resolve()))
+        from joynav.train.train_qwen import resolve_model_load_dtype
+
+        training_args = type("TrainingArgs", (), {"bf16": True})()
+        full_finetune_args = type(
+            "ModelArgs",
+            (),
+            {"model_load_dtype": "auto", "tune_mm_llm": True, "use_lora": False},
+        )()
+        lora_args = type(
+            "ModelArgs",
+            (),
+            {"model_load_dtype": "auto", "tune_mm_llm": True, "use_lora": True},
+        )()
+
+        self.assertEqual(resolve_model_load_dtype(training_args, full_finetune_args), torch.float32)
+        self.assertEqual(resolve_model_load_dtype(training_args, lora_args), torch.bfloat16)
+
+    def test_trainable_low_precision_parameters_are_promoted_to_fp32(self):
+        sys.path.insert(0, str(Path("joynav/train").resolve()))
+        from joynav.train.train_qwen import promote_trainable_parameters_to_fp32
+
+        module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1)).to(torch.bfloat16)
+        for param in module[0].parameters():
+            param.requires_grad = False
+
+        promote_trainable_parameters_to_fp32(module)
+
+        self.assertEqual(module[0].weight.dtype, torch.bfloat16)
+        self.assertEqual(module[1].weight.dtype, torch.float32)
+
+    def test_use_cache_is_disabled_on_nested_qwen_text_config(self):
+        sys.path.insert(0, str(Path("joynav/train").resolve()))
+        from joynav.train.train_qwen import set_model_use_cache
+
+        text_config = type("TextConfig", (), {"use_cache": True})()
+        config = type("Config", (), {"use_cache": True, "text_config": text_config})()
+        model = type("Model", (), {"config": config})()
+
+        set_model_use_cache(model, False)
+
+        self.assertFalse(model.config.use_cache)
+        self.assertFalse(model.config.text_config.use_cache)
 
 
 if __name__ == "__main__":
