@@ -38,7 +38,7 @@ def resolve_vggt_omega_mode(
             image_resolution=image_resolution or 512,
             enable_alignment=False,
         )
-    if omega_mode == "text_align":
+    if omega_mode in {"text_align", "text_align_force_qwen"}:
         return VGGTOmegaModeConfig(
             checkpoint_path=checkpoint_path or DEFAULT_VGGT_OMEGA_TEXT_ALIGN_CHECKPOINT,
             image_resolution=image_resolution or 256,

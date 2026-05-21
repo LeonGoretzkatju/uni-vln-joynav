@@ -46,6 +46,12 @@ def _make_abs_paths(base: Path, files: str) -> str:
     return f"{(base / files).resolve()}"
 
 
+def _make_image_content(base: Path, image) -> Dict[str, Any]:
+    if isinstance(image, (str, Path)):
+        image = _make_abs_paths(base, image)
+    return {"type": "image", "image": image}
+
+
 def update_processor_pixels(processor, data_args):
     logger = logging.getLogger(__name__)
 
@@ -64,7 +70,7 @@ def update_processor_pixels(processor, data_args):
         rank0_print(f"✅ Updated image_processor min_pixels to {data_args.min_pixels}")
         rank0_print(f"✅ Updated image_processor max_pixels to {data_args.max_pixels}")
 
-    if hasattr(ip, "size") and isinstance(ip.size, dict):
+    if hasattr(ip, "size"):
         ip.size["shortest_edge"] = data_args.min_pixels
         ip.size["longest_edge"] = data_args.max_pixels
         rank0_print(
@@ -118,7 +124,7 @@ def update_processor_pixels(processor, data_args):
             vp.fps = data_args.video_fps
             rank0_print(f"✅ Updated video_processor fps to {data_args.video_fps}")
 
-        if hasattr(vp, "size") and isinstance(vp.size, dict):
+        if hasattr(vp, "size"):
             vp.size["shortest_edge"] = data_args.video_min_pixels
             vp.size["longest_edge"] = data_args.video_max_pixels
             rank0_print(
@@ -153,9 +159,7 @@ def _build_messages(item: Dict[str, Any], base_path: Path) -> List[Dict[str, Any
         videos = [videos]
 
     # Build media pools with absolute paths
-    image_pool = [
-        {"type": "image", "image": _make_abs_paths(base_path, img)} for img in images
-    ]
+    image_pool = [_make_image_content(base_path, img) for img in images]
     video_pool = [
         {"type": "video", "video": _make_abs_paths(base_path, vid)} for vid in videos
     ]

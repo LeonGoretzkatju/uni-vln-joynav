@@ -254,6 +254,9 @@ def train(attn_implementation="flash_attention_2"):
                 output.requires_grad_(True)
 
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+    if hasattr(model_args, "omega_mode"):
+        data_args.omega_mode = model_args.omega_mode
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
 

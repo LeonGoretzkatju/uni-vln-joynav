@@ -75,6 +75,9 @@ class JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM(JoyNav_Qwen3_5SpatialForcingF
         with torch.no_grad():
             omega_features = encoder.encode(image_sequence, teacher_layer_spec=self.sf_teacher_layers)
 
+        if self.omega_mode == "text_align_force_qwen":
+            return omega_features.to(dtype=dtype).reshape(-1, omega_features.shape[-1])
+
         return resize_spatial_features_to_grid(
             omega_features.to(dtype=dtype),
             source_hw=source_hw,

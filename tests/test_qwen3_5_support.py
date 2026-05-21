@@ -161,6 +161,7 @@ class Qwen35SupportTest(unittest.TestCase):
 
         mode_512 = resolve_vggt_omega_mode("512_1b")
         mode_text = resolve_vggt_omega_mode("text_align")
+        mode_force = resolve_vggt_omega_mode("text_align_force_qwen")
 
         self.assertEqual(mode_512.image_resolution, 512)
         self.assertFalse(mode_512.enable_alignment)
@@ -168,6 +169,93 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertEqual(mode_text.image_resolution, 256)
         self.assertTrue(mode_text.enable_alignment)
         self.assertTrue(mode_text.checkpoint_path.endswith("vggt_omega_1b_256_text.pt"))
+        self.assertEqual(mode_force.image_resolution, 256)
+        self.assertTrue(mode_force.enable_alignment)
+        self.assertTrue(mode_force.checkpoint_path.endswith("vggt_omega_1b_256_text.pt"))
+
+    def test_text_align_force_qwen_resizes_qwen_grid_to_omega_patch_grid(self):
+        from vggt_omega.utils.load_fn import load_and_preprocess_images
+        from joynav.dataset.vln_action_omega_spatial_forcing_dataset import load_qwen_images_for_omega_direct
+
+        image_path = "/mnt/nas5/xiangchen/VLNData/R2R/images/17DRP5sb8fy_r2r_001803/rgb/001.jpg"
+        omega_images = load_and_preprocess_images([image_path], image_resolution=256, patch_size=16)
+        qwen_images = load_qwen_images_for_omega_direct([image_path], omega_images.shape[-2:], spatial_merge_size=2)
+
+        processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
+        processor.image_processor.max_pixels = 258048
+        processor.image_processor.size["longest_edge"] = 258048
+        sample = {
+            "image": qwen_images,
+            "conversations": [
+                {"from": "human", "value": "<image>\nNavigate to the chair."},
+                {"from": "gpt", "value": "STOP"},
+            ],
+        }
+
+        result = preprocess_qwen_visual([sample], processor)
+
+        self.assertEqual(tuple(omega_images.shape[-2:]), (224, 288))
+        self.assertEqual(qwen_images[0].size, (576, 448))
+        self.assertEqual(result["image_grid_thw"].tolist(), [[1, 28, 36]])
+        self.assertEqual(int((result["mm_token_type_ids"] == 1).sum()), 14 * 18)
+
+    def test_update_processor_pixels_sets_qwen3_5_size_dict(self):
+        from joynav.dataset.lazy_supervised_dataset import update_processor_pixels
+
+        processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
+        data_args = type(
+            "DataArgs",
+            (),
+            {
+                "min_pixels": 65536,
+                "max_pixels": 258048,
+                "video_min_pixels": 4096,
+                "video_max_pixels": 25165824,
+                "video_min_frames": 4,
+                "video_max_frames": 8,
+                "video_fps": 2.0,
+            },
+        )()
+
+        update_processor_pixels(processor, data_args)
+
+        self.assertEqual(processor.image_processor.size["shortest_edge"], 65536)
+        self.assertEqual(processor.image_processor.size["longest_edge"], 258048)
+
+    def test_qwen3_5_omega_force_qwen_script_contract(self):
+        text = Path("scripts/single-qwen3_5-0_8b-sf-omega-force-qwen.sh").read_text()
+
+        self.assertIn("omega_mode=${OMEGA_MODE:-text_align_force_qwen}", text)
+        self.assertIn("text_align_force_qwen)", text)
+        self.assertIn("max_pixels=${MAX_PIXELS:-258048}", text)
+        self.assertIn("gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,2,3}}", text)
+        self.assertIn("--omega_mode ${omega_mode}", text)
+
+    def test_text_align_force_qwen_directly_flattens_omega_patch_tokens(self):
+        from joynav.model.qwen3_5_lm_head_sf_omega import JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM
+
+        class FakeEncoder:
+            patch_size = 16
+
+            def __init__(self):
+                self.features = torch.arange(2 * 6 * 4, dtype=torch.float32).reshape(2, 6, 4)
+
+            def encode(self, image_sequence, teacher_layer_spec):
+                return self.features
+
+        fake_self = type("FakeModel", (), {"omega_mode": "text_align_force_qwen", "sf_teacher_layers": "23"})()
+        encoder = FakeEncoder()
+
+        target = JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM._encode_omega_sequence(
+            fake_self,
+            encoder=encoder,
+            image_sequence=torch.zeros(2, 3, 32, 48),
+            image_grid_thw=torch.tensor([[1, 8, 10], [1, 8, 10]]),
+            dtype=torch.float32,
+            spatial_merge_size=2,
+        )
+
+        self.assertTrue(torch.equal(target, encoder.features.reshape(-1, 4)))
 
     def test_vggt_omega_patch_token_selection_shape(self):
         from joynav.model.geometry_encoder.vggt_omega_encoder import select_vggt_omega_patch_tokens
