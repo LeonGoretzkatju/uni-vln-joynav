@@ -5,6 +5,8 @@ from joynav.dataset.vln_action_omega_spatial_forcing_dataset import (
     prepare_qwen_images_for_omega_direct,
 )
 from joynav.eval.qwen3_vl_lm_head_evaluator import (
+    PROMPT_MODE_QWEN_FINAL,
+    PROMPT_MODE_TRAINING_INTERMEDIATE,
     Qwen3VLLMHeadEvaluatorArguments,
     QwenVLLMHeadEvaluator,
 )
@@ -47,6 +49,14 @@ class Qwen3_5OmegaSpatialForcingEvaluator(QwenVLLMHeadEvaluator):
         self.use_cache = False
         if hasattr(self.args, "use_cache"):
             self.args.use_cache = False
+
+    def get_generation_prompt_mode(self, step_id):
+        num_frames = max(int(self.num_frames), 1)
+        action_chunk_num = max(int(self.action_chunk_num), 1)
+        final_chunk_start = max(num_frames - action_chunk_num, 0)
+        if int(step_id) % num_frames >= final_chunk_start:
+            return PROMPT_MODE_QWEN_FINAL
+        return PROMPT_MODE_TRAINING_INTERMEDIATE
 
     def prepare_input_images(self, input_images):
         if self.args.omega_mode != "text_align_force_qwen":

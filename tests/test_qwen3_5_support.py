@@ -236,7 +236,7 @@ class Qwen35SupportTest(unittest.TestCase):
         text = Path("scripts/eval/eval-qwen3_5-sf-omega.sh").read_text()
 
         self.assertIn("conda activate ${CONDA_ENV:-qwenvln}", text)
-        self.assertIn("export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3}", text)
+        self.assertRegex(text, r"export CUDA_VISIBLE_DEVICES=\$\{CUDA_VISIBLE_DEVICES:-[0-9,]+\}")
         self.assertIn("NPROC_PER_NODE=${NPROC_PER_NODE:-2}", text)
         self.assertIn("MODEL_TYPE=${MODEL_TYPE:-qwen3_5_lm_head_sf_omega}", text)
         self.assertIn("EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_lm_head_sf_omega}", text)
@@ -456,6 +456,114 @@ class Qwen35SupportTest(unittest.TestCase):
 
         self.assertIn("self.use_cache = False", text)
         self.assertIn("self.args.use_cache = False", text)
+
+    def test_qwen3_5_omega_eval_uses_training_prompt_for_intermediate_chunk(self):
+        from joynav.eval.qwen3_vl_lm_head_evaluator import DEFAULT_IMAGE_TOKEN
+        from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import Qwen3_5OmegaSpatialForcingEvaluator
+
+        processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
+        evaluator = Qwen3_5OmegaSpatialForcingEvaluator.__new__(Qwen3_5OmegaSpatialForcingEvaluator)
+        evaluator.processor = processor
+        evaluator.model = SimpleNamespace(device=torch.device("cpu"))
+        evaluator.args = SimpleNamespace(omega_mode="text_align")
+        evaluator.conversation = [
+            {
+                "from": "human",
+                "value": (
+                    "You are an autonomous navigation assistant. Your task is to <instruction>. "
+                    "Devise an action sequence."
+                ),
+            }
+        ]
+        evaluator.conjunctions = ["observe "]
+        evaluator.num_frames = 24
+        evaluator.num_history = 6
+        evaluator.action_chunk_num = 4
+        rgb_list = [Image.new("RGB", (16, 16), (255, 0, 0))]
+        episode = SimpleNamespace(episode_id="0", instruction=SimpleNamespace(instruction_text="Walk."))
+
+        inputs, source = evaluator.prepare_inputs_no_cache(
+            {"image": [], "conversations": []},
+            previous_assistant_text=None,
+            step_id=0,
+            episode=episode,
+            rgb_list=rgb_list,
+        )
+
+        decoded = evaluator.decode_input_ids(inputs["input_ids"])
+        self.assertEqual(source["image"], rgb_list)
+        self.assertTrue(decoded.endswith("<|im_start|>assistant\n"))
+        self.assertIn(f"observe<|vision_start|>", decoded)
+        self.assertNotIn("<|im_start|>assistant\n<think>\n\n</think>\n\n", decoded)
+        self.assertEqual(source["conversations"][0]["value"].count(DEFAULT_IMAGE_TOKEN), 1)
+
+    def test_qwen3_5_omega_eval_subsequent_intermediate_prompt_preserves_action_turn(self):
+        from joynav.eval.qwen3_vl_lm_head_evaluator import DEFAULT_IMAGE_TOKEN
+        from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import Qwen3_5OmegaSpatialForcingEvaluator
+
+        processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
+        evaluator = Qwen3_5OmegaSpatialForcingEvaluator.__new__(Qwen3_5OmegaSpatialForcingEvaluator)
+        evaluator.processor = processor
+        evaluator.model = SimpleNamespace(device=torch.device("cpu"))
+        evaluator.args = SimpleNamespace(omega_mode="text_align")
+        evaluator.conjunctions = ["observe "]
+        evaluator.num_frames = 24
+        evaluator.num_history = 6
+        evaluator.action_chunk_num = 4
+        images = [Image.new("RGB", (16, 16), (i, 0, 0)) for i in range(5)]
+        source = {
+            "image": [images[0]],
+            "conversations": [{"from": "human", "value": f"observe {DEFAULT_IMAGE_TOKEN}."}],
+        }
+        episode = SimpleNamespace(episode_id="0", instruction=SimpleNamespace(instruction_text="Walk."))
+
+        inputs, source = evaluator.prepare_inputs_no_cache(
+            source,
+            previous_assistant_text="<|action|>↑↑↑↑",
+            step_id=4,
+            episode=episode,
+            rgb_list=images,
+        )
+
+        decoded = evaluator.decode_input_ids(inputs["input_ids"])
+        self.assertEqual(len(source["image"]), 2)
+        self.assertEqual([turn["from"] for turn in source["conversations"]], ["human", "gpt", "human"])
+        self.assertEqual(source["conversations"][1]["value"], "<|action|>↑↑↑↑")
+        self.assertEqual(source["conversations"][2]["value"].count(DEFAULT_IMAGE_TOKEN), 1)
+        self.assertIn("<|im_start|>assistant\n<|action|>↑↑↑↑<|im_end|>", decoded)
+        self.assertTrue(decoded.endswith("<|im_start|>assistant\n"))
+        self.assertNotIn("<|im_start|>assistant\n<think>\n\n</think>\n\n", decoded)
+
+    def test_qwen3_5_omega_eval_uses_official_qwen_final_prompt_for_last_chunk(self):
+        from joynav.eval.qwen3_vl_lm_head_evaluator import DEFAULT_IMAGE_TOKEN
+        from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import Qwen3_5OmegaSpatialForcingEvaluator
+
+        processor = AutoProcessor.from_pretrained("/mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B", use_fast=False)
+        evaluator = Qwen3_5OmegaSpatialForcingEvaluator.__new__(Qwen3_5OmegaSpatialForcingEvaluator)
+        evaluator.processor = processor
+        evaluator.model = SimpleNamespace(device=torch.device("cpu"))
+        evaluator.args = SimpleNamespace(omega_mode="text_align")
+        evaluator.conjunctions = ["observe "]
+        evaluator.num_frames = 24
+        evaluator.num_history = 6
+        evaluator.action_chunk_num = 4
+        images = [Image.new("RGB", (16, 16), (i, 0, 0)) for i in range(21)]
+        source = {
+            "image": [images[0]],
+            "conversations": [{"from": "human", "value": f"observe {DEFAULT_IMAGE_TOKEN}."}],
+        }
+        episode = SimpleNamespace(episode_id="0", instruction=SimpleNamespace(instruction_text="Walk."))
+
+        inputs, _ = evaluator.prepare_inputs_no_cache(
+            source,
+            previous_assistant_text="<|action|>↑↑↑↑",
+            step_id=20,
+            episode=episode,
+            rgb_list=images,
+        )
+
+        decoded = evaluator.decode_input_ids(inputs["input_ids"])
+        self.assertTrue(decoded.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n"))
 
     def test_qwen_eval_saves_navigation_video_only_for_successful_episodes(self):
         from joynav.eval.qwen3_vl_lm_head_evaluator import QwenVLLMHeadEvaluator

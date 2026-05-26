@@ -36,6 +36,8 @@ from joynav.utils.dist import *
 from joynav.eval.base_evaluator import BaseEvaluator
 
 DEFAULT_IMAGE_TOKEN = "<image>"
+PROMPT_MODE_QWEN_FINAL = "qwen_final"
+PROMPT_MODE_TRAINING_INTERMEDIATE = "training_intermediate"
 
 @dataclass
 class Qwen3VLLMHeadEvaluatorArguments:
@@ -184,6 +186,46 @@ class QwenVLLMHeadEvaluator(BaseEvaluator):
     def prepare_processor_source(self, source):
         return source
 
+    def get_generation_prompt_mode(self, step_id):
+        return PROMPT_MODE_QWEN_FINAL
+
+    def render_generation_prompt_text(self, messages, prompt_mode):
+        if prompt_mode == PROMPT_MODE_TRAINING_INTERMEDIATE:
+            return (
+                self.processor.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                + "<|im_start|>assistant\n"
+            )
+        if prompt_mode == PROMPT_MODE_QWEN_FINAL:
+            return self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        raise ValueError(f"Unsupported generation prompt mode: {prompt_mode}")
+
+    def build_processor_inputs(self, messages, prompt_mode):
+        if prompt_mode == PROMPT_MODE_QWEN_FINAL:
+            return self.processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+
+        text = self.render_generation_prompt_text(messages, prompt_mode)
+        images, videos = process_vision_info(messages)
+        return self.processor(
+            text=text,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+        )
+
     def config_env(self) -> Env:
         env = Env(config=self.config)
         # env.episodes = env.episodes[0:1]
@@ -258,8 +300,6 @@ class QwenVLLMHeadEvaluator(BaseEvaluator):
                 vis_frames = []
                 step_id = 0
 
-                if self.save_video:
-                    os.makedirs(os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}'), exist_ok=True)
                 initial_height = env.sim.get_agent_state().position[1]
 
                 rgb_list = []
@@ -366,9 +406,11 @@ class QwenVLLMHeadEvaluator(BaseEvaluator):
 
                 metrics = env.get_metrics()
                 if self.should_save_navigation_video(metrics):
+                    video_dir = os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}')
+                    os.makedirs(video_dir, exist_ok=True)
                     images_to_video(
                         vis_frames,
-                        os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}'),
+                        video_dir,
                         f'{episode_id:04d}',
                         fps=6,
                         quality=9,
@@ -465,9 +507,10 @@ class QwenVLLMHeadEvaluator(BaseEvaluator):
         )
         processor_source = self.prepare_processor_source(source)
         messages = build_messages(processor_source)
+        prompt_mode = self.get_generation_prompt_mode(step_id)
 
-        inputs = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors="pt").to(self.model.device)
-        print(f"episode_id-{episode.episode_id} step_id-{step_id} === history_id: {history_id} === decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```")
+        inputs = self.build_processor_inputs(messages, prompt_mode).to(self.model.device)
+        print(f"episode_id-{episode.episode_id} step_id-{step_id} === prompt_mode: {prompt_mode} === history_id: {history_id} === decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```")
         return inputs, source
 
     def require_refresh_window(self, step_id):

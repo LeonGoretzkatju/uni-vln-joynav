@@ -18,10 +18,10 @@ NPROC_PER_NODE=${NPROC_PER_NODE:-2}
 
 MODEL_TYPE=${MODEL_TYPE:-qwen3_5_lm_head_sf_omega}
 EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_lm_head_sf_omega}
-OMEGA_MODE=${OMEGA_MODE:-text_align}
+OMEGA_MODE=${OMEGA_MODE:-text_align_force_qwen}
 
-TEXT_ALIGN_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_5_0_8b_full_sf_omega_bfloat/stage1-r2r+rxr-omega_sf_alpha_0.1-layers_18-teacher_23-lr_5e-6-mm_lr_1e-6-batch_size_1-grad_accum_steps_1-epochs_2-max_pixels_200704/checkpoint-72000
-FORCE_QWEN_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_5_0_8b_full_sf_omega_force_no-interpo/stage1-r2r+rxr-omega_sf_alpha_0.1-layers_18-teacher_23-lr_2e-5-mm_lr_1e-6-batch_size_1-grad_accum_steps_2-epochs_2-max_pixels_258048
+TEXT_ALIGN_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_5_0_8b_full_sf_omega_bfloat/stage1-r2r+rxr-omega_sf_alpha_0.1-layers_18-teacher_23-lr_5e-6-mm_lr_1e-6-batch_size_1-grad_accum_steps_1-epochs_2-max_pixels_200704/checkpoint-78000
+FORCE_QWEN_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/JD-VLN/outputs/qwen3_5_0_8b_full_sf_omega_force_no-interpo/stage1-r2r+rxr-omega_sf_alpha_0.1-layers_18-teacher_23-lr_2e-5-mm_lr_1e-6-batch_size_1-grad_accum_steps_2-epochs_2-max_pixels_258048/checkpoint-40270
 OMEGA_512_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_512.pt
 OMEGA_TEXT_CHECKPOINT=/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_256_text.pt
 
@@ -68,7 +68,7 @@ NUM_HISTORY=${NUM_HISTORY:-6}
 ACTION_CHUNK_NUM=${ACTION_CHUNK_NUM:-4}
 MAX_NEW_TOKENS=${MAX_NEW_TOKENS:-128}
 USE_CACHE=${USE_CACHE:-0}
-SAVE_VIDEO=${SAVE_VIDEO:-0}
+SAVE_VIDEO=${SAVE_VIDEO:-1}
 SF_TARGET_DIM=${SF_TARGET_DIM:-2048}
 SF_TEACHER_LAYERS=${SF_TEACHER_LAYERS:-23}
 SF_ALIGN_LAYERS=${SF_ALIGN_LAYERS:-18}
