@@ -3,24 +3,57 @@ import copy
 from dataclasses import dataclass, field
 from typing import Dict, Sequence
 
+from PIL import Image
+
 from .base_dataset_args import BaseDatasetArguments
 from .vln_action_dataset import VLNActionCollator, VLNActionDataset
 from .vln_action_dataset_args import VLNActionDatasetArguments
 from vggt_omega.utils.load_fn import (
+    _balanced_target_shape,
     _crop_to_supported_aspect_ratio,
     _load_rgb_image,
     load_and_preprocess_images,
 )
 
 
+def _load_or_copy_rgb_image(image):
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+    return _load_rgb_image(image)
+
+
+def prepare_qwen_images_for_omega_direct(
+    images,
+    omega_hw=None,
+    spatial_merge_size=2,
+    image_resolution=256,
+    patch_size=16,
+):
+    cropped_images = [_crop_to_supported_aspect_ratio(_load_or_copy_rgb_image(image)) for image in images]
+    if omega_hw is None:
+        target_shapes = [
+            _balanced_target_shape(image.size[1] / max(image.size[0], 1), image_resolution, patch_size)
+            for image in cropped_images
+        ]
+        max_h = max(target_h for target_h, _ in target_shapes)
+        max_w = max(target_w for _, target_w in target_shapes)
+        target_shapes = [(max_h, max_w)] * len(cropped_images)
+    else:
+        target_shapes = [(int(omega_hw[0]), int(omega_hw[1]))] * len(cropped_images)
+
+    qwen_images = []
+    for image, (target_h, target_w) in zip(cropped_images, target_shapes):
+        qwen_images.append(image.resize((target_w * spatial_merge_size, target_h * spatial_merge_size)))
+    return qwen_images
+
+
 def load_qwen_images_for_omega_direct(image_path_list, omega_hw, spatial_merge_size):
-    target_h, target_w = [int(v) for v in omega_hw]
-    return [
-        _crop_to_supported_aspect_ratio(_load_rgb_image(image_path)).resize(
-            (target_w * spatial_merge_size, target_h * spatial_merge_size)
-        )
-        for image_path in image_path_list
-    ]
+    return prepare_qwen_images_for_omega_direct(
+        image_path_list,
+        omega_hw=omega_hw,
+        spatial_merge_size=spatial_merge_size,
+    )
+
 
 
 @dataclass

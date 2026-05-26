@@ -20,7 +20,10 @@ class JoyNav_Qwen3_5OmegaSpatialForcingArguments(JoyNav_Qwen3_5SpatialForcingArg
     sf_target_dim: int = field(default=2048, metadata={"help": "VGGT-Omega cached patch token dimension."})
     sf_teacher_layers: str = field(default="23", metadata={"help": "Cached VGGT-Omega aggregator layers to align."})
     sf_add_pos_embed: bool = field(default=False)
-    omega_mode: str = field(default="512_1b", metadata={"help": "VGGT-Omega mode: 512_1b or text_align."})
+    omega_mode: str = field(
+        default="512_1b",
+        metadata={"help": "VGGT-Omega mode: 512_1b, text_align, or text_align_force_qwen."},
+    )
 
 
 class JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM(JoyNav_Qwen3_5SpatialForcingForCausalLM):

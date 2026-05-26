@@ -56,7 +56,7 @@ model_max_length=${MODEL_MAX_LENGTH:-163840}
 precision_arg=${PRECISION_ARG:-"--bf16"}
 logging_steps=${LOGGING_STEPS:-1}
 logging_nan_inf_filter=${LOGGING_NAN_INF_FILTER:-False}
-gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-0,1,2}}
+gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,2,3}}
 
 num_frames=${NUM_FRAMES:-24}
 num_history=${NUM_HISTORY:-6}

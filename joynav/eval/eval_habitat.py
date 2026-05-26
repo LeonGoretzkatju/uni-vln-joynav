@@ -8,7 +8,7 @@ sys.path.append(str(project_root))
 import numpy as np
 import torch
 import transformers
-from transformers import AutoProcessor
+from transformers import AutoConfig, AutoProcessor
 
 # Import for Habitat registry side effects — do not remove
 from joynav.eval.habitat_extensions import measures
@@ -27,6 +27,7 @@ from joynav.eval.qwen3_vl_lm_head_evaluator import Qwen3VLLMHeadEvaluator
 from joynav.eval.qwen3_vl_lm_head_dyna_evaluator import Qwen3VLLMDynamicRopeEvaluator
 from joynav.eval.qwen3_vl_lm_head_sf_evaluator import Qwen3VLSpatialForcingEvaluator
 from joynav.eval.qwen3_vl_lm_head_sf_dyna_evaluator import Qwen3VLSpatialForcingDynamicRopeEvaluator
+from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import Qwen3_5OmegaSpatialForcingEvaluator
 
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
 register_component('evaluator', 'qwen3_vl_dit_head', Qwen3VLDiTEvaluator)
@@ -35,6 +36,26 @@ register_component('evaluator', 'qwen3_vl_lm_head', Qwen3VLLMHeadEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head_dyna', Qwen3VLLMDynamicRopeEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head_sf', Qwen3VLSpatialForcingEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head_sf_dyna', Qwen3VLSpatialForcingDynamicRopeEvaluator)
+register_component('evaluator', 'qwen3_5_lm_head_sf_omega', Qwen3_5OmegaSpatialForcingEvaluator)
+
+OMEGA_MODEL_CONFIG_FIELDS = (
+    "omega_mode",
+    "sf_geometry_encoder_path",
+    "sf_target_dim",
+    "sf_teacher_layers",
+    "sf_align_layers",
+    "sf_alpha",
+    "sf_add_pos_embed",
+)
+
+
+def get_explicit_cli_fields(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    fields = set()
+    for arg in argv:
+        if arg.startswith("--"):
+            fields.add(arg[2:].split("=", 1)[0].replace("-", "_"))
+    return fields
 
 def parse_args():
     """Two-stage argument parsing."""
@@ -60,6 +81,18 @@ def rank0_print(*args):
     else:
         print(*args)
 
+def build_model_config(args, explicit_fields=None):
+    config = AutoConfig.from_pretrained(args.model_path)
+    if args.model_type == "qwen3_5_lm_head_sf_omega":
+        explicit_fields = get_explicit_cli_fields() if explicit_fields is None else explicit_fields
+        for field_name in OMEGA_MODEL_CONFIG_FIELDS:
+            if field_name in explicit_fields and hasattr(args, field_name):
+                setattr(config, field_name, getattr(args, field_name))
+        for field_name in OMEGA_MODEL_CONFIG_FIELDS:
+            if hasattr(config, field_name) and hasattr(args, field_name):
+                setattr(args, field_name, getattr(config, field_name))
+    return config
+
 def update_processor_pixels(processor, data_args):
     # --- Image Processor ---
     ip = processor.image_processor
@@ -78,7 +111,7 @@ def update_processor_pixels(processor, data_args):
         rank0_print(f"✅ Updated image_processor min_pixels to {data_args.min_pixels}")
         rank0_print(f"✅ Updated image_processor max_pixels to {data_args.max_pixels}")
 
-    if hasattr(ip, "size") and isinstance(ip.size, dict):
+    if hasattr(ip, "size") and hasattr(ip.size, "__setitem__"):
         if data_args.min_pixels is not None:
             ip.size["shortest_edge"] = data_args.min_pixels
         if data_args.max_pixels is not None:
@@ -122,12 +155,16 @@ def main():
     attn_implementation = os.environ.get("ATTN_IMPLEMENTATION", "sdpa")
     rank0_print(f"Evaluation dtype: {eval_dtype}, attention: {attn_implementation}")
 
+    model_config = build_model_config(args)
     model = model_class.from_pretrained(
         args.model_path,
         dtype=eval_dtype,
         attn_implementation=attn_implementation,
         device_map={"": device},
+        config=model_config,
     )
+    if hasattr(model, "post_update_model"):
+        model.post_update_model()
     model.eval()
     world_size = get_world_size()
 

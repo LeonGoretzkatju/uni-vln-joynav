@@ -6,6 +6,7 @@ import os
 import random
 import re
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
@@ -30,6 +31,7 @@ from PIL import Image, ImageDraw, ImageFont
 from torch import Tensor
 from transformers.image_utils import to_numpy_array
 from qwen_vl_utils import process_vision_info
+from joynav.dataset.lazy_supervised_dataset import _build_messages as build_training_messages
 from joynav.utils.dist import *
 from joynav.eval.base_evaluator import BaseEvaluator
 
@@ -59,6 +61,8 @@ class Qwen3VLLMHeadEvaluatorArguments:
     save_video: bool = field(default=False, metadata={"help": "Whether to save video of trajectories"})
     use_cache: bool = field(default=False, metadata={"help": "Whether to use KV cache during generation"})
     limit: int = field(default=-1, metadata={"help": "Limit number of evaluation episodes (0 for no limit)"})
+    num_frames: int = field(default=32, metadata={"help": "Number of environment steps in one interleaved dialogue window"})
+    num_history: int = field(default=8, metadata={"help": "Number of sparse history frames at each dialogue window reset"})
 
     # VLN-specific parameters
     action_chunk_num: int = field(default=8, metadata={"help": "Number of actions to generate per chunk"})
@@ -77,67 +81,12 @@ class Qwen3VLLMHeadEvaluatorArguments:
 
 
 def build_messages(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-    # Extract and normalize images and videos
-    images = item.get("image") or []
-    if isinstance(images, str):
-        images = [images]
-
-    videos = item.get("video") or []
-    if isinstance(videos, str):
-        videos = [videos]
-
-    # Build media pools with absolute paths
-    image_pool = [
-        {"type": "image", "image": img} for img in images
-    ]
-    video_pool = [
-        {"type": "video", "video": vid} for vid in videos
-    ]
-
-    messages = []
-    for turn in item["conversations"]:
-        role = "user" if turn["from"] == "human" else "assistant"
-        text: str = turn["value"]
-
-        if role == "user":
-            content = []
-            # Split text by <image> or <video> placeholders while keeping delimiters
-            text_parts = re.split(r"(<image>|<video>)", text)
-            for seg in text_parts:
-                if seg == "<image>":
-                    if not image_pool:
-                        raise ValueError(
-                            "Number of <image> placeholders exceeds the number of provided images"
-                        )
-                    content.append(image_pool.pop(0))
-                elif seg == "<video>":
-                    if not video_pool:
-                        raise ValueError(
-                            "Number of <video> placeholders exceeds the number of provided videos"
-                        )
-                    content.append(video_pool.pop(0))
-                elif seg.strip():
-                    content.append({"type": "text", "text": seg.strip()})
-            messages.append({"role": role, "content": content})
-        else:
-            # Assistant messages contain only text
-            messages.append({"role": role, "content": [{"type": "text", "text": text}]})
-
-    # Check for unused media files
-    if image_pool:
-        raise ValueError(
-            f"{len(image_pool)} image(s) remain unused (not consumed by placeholders)"
-        )
-    if video_pool:
-        raise ValueError(
-            f"{len(video_pool)} video(s) remain unused (not consumed by placeholders)"
-        )
-
-    return messages
+    base_path = Path(item.get("data_path", ""))
+    return build_training_messages(item, base_path)
 
 
-class Qwen3VLLMHeadEvaluator(BaseEvaluator):
-    """VLN evaluator for discrete actions."""
+class QwenVLLMHeadEvaluator(BaseEvaluator):
+    """Shared VLN LM-head evaluator for Qwen-VL models."""
     
     ARGUMENT_CLASS = Qwen3VLLMHeadEvaluatorArguments
     
@@ -211,12 +160,29 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
             "←": [2],
             "→": [3]
         })
+        self.conjunctions = [
+            'you can see ',
+            'in front of you is ',
+            'there is ',
+            'you can spot ',
+            'you are toward the ',
+            'ahead of you is ',
+            'in your sight is '
+        ]
 
         # VLN-specifc parameters
+        self.num_frames = args.num_frames
+        self.num_history = args.num_history
         self.action_chunk_num = args.action_chunk_num
         self.min_window_size = args.min_window_size
         self.max_window_size = args.max_window_size
         self.temporal_interval = args.temporal_interval
+
+    def prepare_input_images(self, input_images):
+        return input_images
+
+    def prepare_processor_source(self, source):
+        return source
 
     def config_env(self) -> Env:
         env = Env(config=self.config)
@@ -301,6 +267,7 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
                 past_key_values = None
                 accum_input_ids = None
                 llm_outputs = None
+                previous_assistant_text = None
                 source = {
                     "image": [],
                     "conversations": [],
@@ -336,23 +303,28 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
                         vis_frames.append(frame)
 
                     if len(action_seq) == 0:
-                        if self.require_refresh_window(step_id) or past_key_values is None:
-                            past_key_values = None
-                            accum_input_ids = None
-
                         if self.use_cache:
+                            if self.require_refresh_window(step_id) or past_key_values is None:
+                                past_key_values = None
+                                accum_input_ids = None
                             inputs, text = self.prepare_inputs_use_cache(step_id, episode, rgb_list)
                             inputs["input_ids"] = torch.cat([accum_input_ids, inputs.input_ids], dim=1) if accum_input_ids is not None else inputs.input_ids
                             inputs["attention_mask"] = torch.ones_like(inputs.input_ids)
                         else:
-                            inputs, text = self.prepare_inputs_no_cache(step_id, episode, rgb_list)
+                            inputs, source = self.prepare_inputs_no_cache(
+                                source,
+                                previous_assistant_text,
+                                step_id,
+                                episode,
+                                rgb_list,
+                            )
 
                         input_len = inputs.input_ids.shape[1]
                         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
                         cache_position = torch.arange(past_seen_tokens, input_len, device=inputs.input_ids.device) if past_key_values is not None else None
 
                         with torch.no_grad():
-                            outputs = self.model.generate(**inputs, max_new_tokens=128, num_beams=1, do_sample=False, use_cache=self.use_cache, return_dict_in_generate=True, past_key_values=past_key_values, cache_position=cache_position)
+                            outputs = self.model.generate(**inputs, max_new_tokens=self.args.max_new_tokens, num_beams=1, do_sample=False, use_cache=self.use_cache, return_dict_in_generate=True, past_key_values=past_key_values, cache_position=cache_position)
 
                         output_ids = outputs.sequences
                         past_key_values = outputs.past_key_values
@@ -362,10 +334,10 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
                             print(f"KV cache updated: {self.decode_input_ids(accum_input_ids)}")
 
 
-                        llm_outputs = self.processor.tokenizer.decode(
-                            output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-                        )
-                        # llm_outputs = self.processor.tokenizer.batch_decode(output_ids, skip_special_tokens=False)[0].strip()
+                        generated_token_ids = output_ids[0][inputs.input_ids.shape[1] :]
+                        llm_outputs = self.decode_generated_text(generated_token_ids)
+                        if not self.use_cache:
+                            previous_assistant_text = llm_outputs
 
                         action_seq = self.parse_actions(llm_outputs)
                         print(f"episode_id-{episode.episode_id} step_id-{step_id} === llm_outputs: {llm_outputs} === action_seq: {action_seq}")
@@ -379,11 +351,21 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
                     
                     observations = env.step(action)
                     step_id += 1
+                    if self.should_reset_interleaved_source(step_id):
+                        llm_outputs = None
+                        previous_assistant_text = None
+                        source = {
+                            "image": [],
+                            "conversations": [],
+                        }
+                        if not self.use_cache:
+                            past_key_values = None
+                            accum_input_ids = None
 
                 process_bar.update(1)
 
                 metrics = env.get_metrics()
-                if self.save_video:
+                if self.should_save_navigation_video(metrics):
                     images_to_video(
                         vis_frames,
                         os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}'),
@@ -434,33 +416,59 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
         actions = itertools.chain.from_iterable(actions)
         return list(actions)
 
-    def prepare_inputs_no_cache(self, step_id, episode, rgb_list):
-        history_id = []
-        conversation = copy.deepcopy(self.conversation)
-        conversation[0]["value"] = conversation[0]["value"].replace(
-            '<instruction>.', episode.instruction.instruction_text[:-1]
-        )
-        
-        # iterate from min_window_size to max_window_size
-        image_num = self.min_window_size + \
-            (step_id // self.temporal_interval)%(self.max_window_size - self.min_window_size + 1)
+    def should_reset_interleaved_source(self, step_id):
+        return step_id > 0 and step_id % self.num_frames == 0
 
-        history_ids = list(range(step_id, -1, -self.temporal_interval))[:image_num][::-1]
-        input_images = [rgb_list[i] for i in history_ids]
-        history_str = DEFAULT_IMAGE_TOKEN * len(history_ids)
-        conversation[0]["value"] += history_str
+    def should_save_navigation_video(self, metrics):
+        if not self.save_video:
+            return False
+        return float(metrics.get("success", 0.0)) == 1.0
+
+    def build_interleaved_source(self, source, previous_assistant_text, step_id, episode, rgb_list):
+        history_id = []
+        prompt = random.choice(self.conjunctions) + DEFAULT_IMAGE_TOKEN
+        if previous_assistant_text is None:
+            conversation = copy.deepcopy(self.conversation)
+            conversation[0]["value"] = conversation[0]["value"].replace(
+                '<instruction>.', episode.instruction.instruction_text
+            )
+            if step_id != 0:
+                num_history = max(int(self.num_history), 1)
+                history_stride = max(int(step_id) // num_history, 1)
+                history_id = np.arange(0, int(step_id), history_stride, dtype=np.int32).tolist()
+                if len(history_id) > num_history:
+                    history_id = history_id[:num_history]
+                history_str = (DEFAULT_IMAGE_TOKEN + '\n') * len(history_id)
+                conversation[0]["value"] += f' These are your historical observations: {history_str}.'
+            conversation[0]["value"] += f" {prompt}."
+        else:
+            conversation = [
+                {"from": "gpt", "value": previous_assistant_text},
+                {"from": "human", "value": f"{prompt}."},
+            ]
+
+        input_images = [rgb_list[i] for i in history_id] + rgb_list[-1:]
 
         source = {
-            "image": input_images,
-            "conversations": conversation,
+            "image": source["image"] + input_images,
+            "conversations": source["conversations"] + conversation,
         }
-        messages = build_messages(source)
+        return source, history_id
 
+    def prepare_inputs_no_cache(self, source, previous_assistant_text, step_id, episode, rgb_list):
+        source, history_id = self.build_interleaved_source(
+            source,
+            previous_assistant_text,
+            step_id,
+            episode,
+            rgb_list,
+        )
+        processor_source = self.prepare_processor_source(source)
+        messages = build_messages(processor_source)
 
         inputs = self.processor.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors="pt").to(self.model.device)
-        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         print(f"episode_id-{episode.episode_id} step_id-{step_id} === history_id: {history_id} === decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```")
-        return inputs, text
+        return inputs, source
 
     def require_refresh_window(self, step_id):
         sid = (step_id // self.temporal_interval) % (self.max_window_size - self.min_window_size + 1)  
@@ -469,13 +477,20 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
     def prepare_inputs_use_cache(self, step_id, episode, rgb_list):
 
         if self.require_refresh_window(step_id):
-            return self.prepare_inputs_no_cache(step_id, episode, rgb_list)
+            return self.prepare_inputs_no_cache(
+                {"image": [], "conversations": []},
+                None,
+                step_id,
+                episode,
+                rgb_list,
+            )
         
         prompt = DEFAULT_IMAGE_TOKEN
         conversation = [
             {"from": "human", "value": prompt}
         ]
         input_images = rgb_list[-1:]
+        input_images = self.prepare_input_images(input_images)
         source = {
             "image": input_images,
             "conversations": conversation,
@@ -525,3 +540,19 @@ class Qwen3VLLMHeadEvaluator(BaseEvaluator):
         
         cleaned_str = re.sub(pattern, replacer, decoded_str)
         return cleaned_str
+
+    def decode_generated_text(self, generated_token_ids):
+        decoded_str = self.processor.tokenizer.decode(generated_token_ids, skip_special_tokens=False)
+        terminators = [
+            "<|im_end|>",
+            getattr(self.processor.tokenizer, "eos_token", None),
+            "<|endoftext|>",
+        ]
+        for terminator in terminators:
+            if terminator and terminator in decoded_str:
+                decoded_str = decoded_str.split(terminator, 1)[0]
+        return decoded_str.strip()
+
+
+class Qwen3VLLMHeadEvaluator(QwenVLLMHeadEvaluator):
+    """Compatibility evaluator name for existing Qwen3-VL scripts."""

@@ -73,3 +73,37 @@ else:
                     kwargs.get("position_ids"),
                 )
             return Qwen3_5ForConditionalGeneration.forward(self, *args, **kwargs)
+
+        def prepare_inputs_for_generation(
+            self,
+            input_ids,
+            past_key_values=None,
+            attention_mask=None,
+            inputs_embeds=None,
+            position_ids=None,
+            use_cache=True,
+            pixel_values=None,
+            pixel_values_videos=None,
+            image_grid_thw=None,
+            video_grid_thw=None,
+            mm_token_type_ids=None,
+            is_first_iteration=False,
+            **kwargs,
+        ):
+            model_inputs = super().prepare_inputs_for_generation(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                position_ids=position_ids,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                use_cache=use_cache,
+                is_first_iteration=is_first_iteration,
+                **kwargs,
+            )
+            if mm_token_type_ids is not None and model_inputs.get("pixel_values") is not None:
+                model_inputs["mm_token_type_ids"] = mm_token_type_ids
+            return model_inputs
