@@ -1,6 +1,9 @@
 __pycache__
 results
 data
+!scripts/data/
+!scripts/data/create-vlnn1-annotations.py
+!scripts/data/download-vlnn1-scene.sh
 outputs
 .claude
 habitat-lab

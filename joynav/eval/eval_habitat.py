@@ -28,6 +28,11 @@ from joynav.eval.qwen3_vl_lm_head_dyna_evaluator import Qwen3VLLMDynamicRopeEval
 from joynav.eval.qwen3_vl_lm_head_sf_evaluator import Qwen3VLSpatialForcingEvaluator
 from joynav.eval.qwen3_vl_lm_head_sf_dyna_evaluator import Qwen3VLSpatialForcingDynamicRopeEvaluator
 from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import Qwen3_5OmegaSpatialForcingEvaluator
+from joynav.eval.qwen3_5_omega_trajectory_head_evaluator import (
+    Qwen3_5OmegaDiTTrajectoryEvaluator,
+    Qwen3_5OmegaMLPTrajectoryEvaluator,
+    Qwen3_5OmegaNextDiTTrajectoryEvaluator,
+)
 
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
 register_component('evaluator', 'qwen3_vl_dit_head', Qwen3VLDiTEvaluator)
@@ -37,6 +42,9 @@ register_component('evaluator', 'qwen3_vl_lm_head_dyna', Qwen3VLLMDynamicRopeEva
 register_component('evaluator', 'qwen3_vl_lm_head_sf', Qwen3VLSpatialForcingEvaluator)
 register_component('evaluator', 'qwen3_vl_lm_head_sf_dyna', Qwen3VLSpatialForcingDynamicRopeEvaluator)
 register_component('evaluator', 'qwen3_5_lm_head_sf_omega', Qwen3_5OmegaSpatialForcingEvaluator)
+register_component('evaluator', 'qwen3_5_mlp_head_sf_omega', Qwen3_5OmegaMLPTrajectoryEvaluator)
+register_component('evaluator', 'qwen3_5_dit_head_sf_omega', Qwen3_5OmegaDiTTrajectoryEvaluator)
+register_component('evaluator', 'qwen3_5_nextdit_head_sf_omega', Qwen3_5OmegaNextDiTTrajectoryEvaluator)
 
 OMEGA_MODEL_CONFIG_FIELDS = (
     "omega_mode",
@@ -46,6 +54,33 @@ OMEGA_MODEL_CONFIG_FIELDS = (
     "sf_align_layers",
     "sf_alpha",
     "sf_add_pos_embed",
+)
+
+OMEGA_MODEL_TYPES = {
+    "qwen3_5_lm_head_sf_omega",
+    "qwen3_5_mlp_head_sf_omega",
+    "qwen3_5_dit_head_sf_omega",
+    "qwen3_5_nextdit_head_sf_omega",
+}
+
+TRAJECTORY_MODEL_CONFIG_FIELDS = (
+    "trajectory_horizon",
+    "trajectory_dim",
+    "action_head_hidden_dim",
+    "action_head_loss_weight",
+    "propagate_action_head_grad",
+    "action_latent_config",
+    "action_latent_layers",
+    "action_latent_dim",
+    "action_latent_heads",
+    "action_num_inference_timesteps",
+    "nextdit_dim",
+    "nextdit_layers",
+    "nextdit_heads",
+    "nextdit_kv_heads",
+    "nextdit_num_inference_steps",
+    "nextdit_num_sample_trajs",
+    "nextdit_guidance_scale",
 )
 
 
@@ -83,12 +118,15 @@ def rank0_print(*args):
 
 def build_model_config(args, explicit_fields=None):
     config = AutoConfig.from_pretrained(args.model_path)
-    if args.model_type == "qwen3_5_lm_head_sf_omega":
+    if args.model_type in OMEGA_MODEL_TYPES:
         explicit_fields = get_explicit_cli_fields() if explicit_fields is None else explicit_fields
-        for field_name in OMEGA_MODEL_CONFIG_FIELDS:
+        config_fields = list(OMEGA_MODEL_CONFIG_FIELDS)
+        if args.model_type != "qwen3_5_lm_head_sf_omega":
+            config_fields += list(TRAJECTORY_MODEL_CONFIG_FIELDS)
+        for field_name in config_fields:
             if field_name in explicit_fields and hasattr(args, field_name):
                 setattr(config, field_name, getattr(args, field_name))
-        for field_name in OMEGA_MODEL_CONFIG_FIELDS:
+        for field_name in config_fields:
             if hasattr(config, field_name) and hasattr(args, field_name):
                 setattr(args, field_name, getattr(config, field_name))
     return config

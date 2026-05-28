@@ -5,6 +5,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
+import numpy as np
 from PIL import Image
 import torch
 from transformers import AutoProcessor
@@ -806,6 +807,438 @@ class Qwen35SupportTest(unittest.TestCase):
 
         self.assertFalse(model.config.use_cache)
         self.assertFalse(model.config.text_config.use_cache)
+
+    def test_vlnn1_relative_pose_is_ego_centric_ros_xy(self):
+        from joynav.dataset.vlnn1_annotation_utils import build_continuous_actions
+
+        transforms = torch.eye(4, dtype=torch.float64).repeat(3, 1, 1).numpy()
+        transforms[1, :3, 3] = [0.0, 1.0, 0.0]  # Blender +Y -> ROS +X
+        transforms[2, :3, 3] = [1.0, 0.0, 0.0]  # Blender +X -> ROS -Y
+        frame_indices = torch.tensor([0, 3, 6]).numpy()
+
+        actions, _ = build_continuous_actions(
+            transforms=transforms,
+            frame_indices=frame_indices,
+            step_stride=1,
+            action_chunk_size=3,
+        )
+
+        self.assertEqual(sorted(actions), ["0"])
+        self.assertEqual(actions["0"][0], [0.0, 0.0, 0.0])
+        self.assertAlmostEqual(actions["0"][1][0], 1.0, places=6)
+        self.assertAlmostEqual(actions["0"][1][1], 0.0, places=6)
+        self.assertAlmostEqual(actions["0"][2][0], 0.0, places=6)
+        self.assertAlmostEqual(actions["0"][2][1], -1.0, places=6)
+
+    def test_trajectory_mse_wraps_yaw_at_pi_boundary(self):
+        from joynav.model.qwen3_5_trajectory_heads import trajectory_mse_loss
+
+        pred = torch.tensor([[[0.0, 0.0, -3.0415926]]])
+        target = torch.tensor([[[0.0, 0.0, 3.0415926]]])
+
+        loss = trajectory_mse_loss(pred, target)
+
+        self.assertLess(float(loss), 0.02)
+
+    def test_trajectory_dit_head_uses_waypoint_mse_contract(self):
+        from joynav.model.action_latent.modeling_action_latent import ActionLatent_Config
+        from joynav.model.qwen3_5_trajectory_heads import (
+            TrajectoryDiTHead,
+            select_action_token_features,
+            trajectory_mse_loss,
+        )
+
+        config = ActionLatent_Config(
+            time_channel=8,
+            time_embedding_dim=8,
+            latent_dim=8,
+            vl_input_dim=4,
+            heads=2,
+            layers=1,
+            output_dim=8,
+            action_dim=3,
+            action_hidden_dim=8,
+            vl_heads=2,
+            vl_self_layers=1,
+            max_seq_len=8,
+            action_horizon=2,
+        )
+        hidden_states = torch.randn(2, 5, 4)
+        select_mask = torch.zeros(2, 5, dtype=torch.bool)
+        select_mask[0, 1] = True
+        select_mask[1, 4] = True
+        target = torch.randn(2, 2, 3)
+
+        selected = select_action_token_features(hidden_states, select_mask)
+        pred = TrajectoryDiTHead(config)(selected)
+        loss = trajectory_mse_loss(pred, target)
+
+        self.assertEqual(selected.shape, (2, 4))
+        self.assertEqual(pred.shape, target.shape)
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_qwen3_5_dit_trajectory_forward_uses_wrapped_mse(self):
+        import inspect
+
+        from joynav.model.qwen3_5_trajectory_heads import JoyNav_Qwen3_5OmegaDiTForCausalLM
+
+        source = inspect.getsource(JoyNav_Qwen3_5OmegaDiTForCausalLM.forward)
+
+        self.assertIn("selected_features = select_action_token_features(features, select_mask)", source)
+        self.assertIn("trajectory_mse_loss(pred_actions, target_actions)", source)
+        self.assertNotIn("self.action_latent(", source)
+
+    def test_nextdit_trajectory_modules_import(self):
+        from diffusers import FlowMatchEulerDiscreteScheduler
+        from joynav.model.nextdit.nextdit_crossattn_traj import NextDiTCrossAttn, NextDiTCrossAttnConfig
+        from joynav.model.nextdit.nextdit_traj import LuminaNextDiT2DModel
+
+        self.assertEqual(FlowMatchEulerDiscreteScheduler.__name__, "FlowMatchEulerDiscreteScheduler")
+        self.assertEqual(NextDiTCrossAttn.__name__, "NextDiTCrossAttn")
+        self.assertEqual(NextDiTCrossAttnConfig.model_type, "nextdit-crossattn")
+        self.assertEqual(LuminaNextDiT2DModel.__name__, "LuminaNextDiT2DModel")
+
+    def test_trajectory_nextdit_head_forward_and_loss_are_finite(self):
+        from joynav.model.qwen3_5_trajectory_heads import TrajectoryNextDiTHead
+
+        head = TrajectoryNextDiTHead(
+            input_dim=4,
+            action_horizon=8,
+            action_dim=3,
+            dim=8,
+            layers=1,
+            heads=2,
+            kv_heads=2,
+            num_inference_steps=2,
+        )
+        selected_features = torch.randn(2, 4)
+        target = torch.randn(2, 8, 3)
+
+        pred = head(selected_features)
+        loss = head.flow_matching_loss(selected_features, target)
+
+        self.assertEqual(pred.shape, (2, 8, 3))
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_nextdit_loss_accepts_flattened_interleaved_targets(self):
+        from joynav.model.qwen3_5_trajectory_heads import Qwen35OmegaTrajectoryMixin, TrajectoryNextDiTHead
+
+        head = TrajectoryNextDiTHead(
+            input_dim=4,
+            action_horizon=8,
+            action_dim=3,
+            dim=8,
+            layers=1,
+            heads=2,
+            kv_heads=2,
+            num_inference_steps=2,
+        )
+        mixin = Qwen35OmegaTrajectoryMixin()
+        selected_features = torch.randn(6, 4)
+        target = mixin._normalize_target_actions(torch.randn(2, 3, 8, 3), selected_count=6)
+
+        loss = head.flow_matching_loss(selected_features, target)
+
+        self.assertEqual(target.shape, (6, 8, 3))
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_action_latent_can_initialize_on_meta_device(self):
+        from joynav.model.action_latent.modeling_action_latent import ActionLatent, ActionLatent_Config
+
+        config = ActionLatent_Config(
+            time_channel=8,
+            time_embedding_dim=16,
+            latent_dim=16,
+            vl_input_dim=16,
+            heads=4,
+            layers=1,
+            output_dim=16,
+            action_dim=3,
+            action_hidden_dim=16,
+            vl_heads=4,
+            vl_self_layers=1,
+            max_seq_len=8,
+            action_horizon=2,
+        )
+
+        with torch.device("meta"):
+            module = ActionLatent(config)
+
+        self.assertEqual(module.action_horizon, 2)
+
+    def test_qwen3_5_continuous_omega_model_types_are_registered(self):
+        import joynav.model  # noqa: F401
+        import joynav.dataset  # noqa: F401
+
+        self.assertEqual(
+            get_component("model", "qwen3_5_mlp_head_sf_omega").__name__,
+            "JoyNav_Qwen3_5OmegaMLPForCausalLM",
+        )
+        self.assertEqual(
+            get_component("model", "qwen3_5_dit_head_sf_omega").__name__,
+            "JoyNav_Qwen3_5OmegaDiTForCausalLM",
+        )
+        self.assertEqual(
+            get_component("model", "qwen3_5_nextdit_head_sf_omega").__name__,
+            "JoyNav_Qwen3_5OmegaNextDiTForCausalLM",
+        )
+        self.assertEqual(
+            get_component("dataset", "continuous_vlnn1_action_noninterleave_sf_omega").__name__,
+            "ContinuousVLNN1ActionOmegaSpatialForcingDataset",
+        )
+        self.assertEqual(
+            get_component("dataset", "continuous_vlnn1_action_interleave_sf_omega").__name__,
+            "ContinuousVLNN1ActionInterleavedOmegaSpatialForcingDataset",
+        )
+
+    def test_qwen3_5_trajectory_selects_multiple_action_tokens(self):
+        from joynav.model.qwen3_5_trajectory_heads import select_action_token_features
+
+        hidden = torch.arange(2 * 5 * 3, dtype=torch.float32).view(2, 5, 3)
+        select_mask = torch.zeros(2, 5, dtype=torch.bool)
+        select_mask[0, [1, 3]] = True
+        select_mask[1, [2]] = True
+
+        selected = select_action_token_features(hidden, select_mask)
+
+        self.assertEqual(selected.shape, (3, 3))
+        self.assertTrue(torch.equal(selected[0], hidden[0, 1]))
+        self.assertTrue(torch.equal(selected[1], hidden[0, 3]))
+        self.assertTrue(torch.equal(selected[2], hidden[1, 2]))
+
+    def test_qwen3_5_trajectory_targets_flatten_interleaved_chunks(self):
+        from joynav.model.qwen3_5_trajectory_heads import Qwen35OmegaTrajectoryMixin
+
+        mixin = Qwen35OmegaTrajectoryMixin()
+        targets = torch.zeros(2, 3, 8, 3)
+
+        flattened = mixin._normalize_target_actions(targets, selected_count=6)
+
+        self.assertEqual(flattened.shape, (6, 8, 3))
+
+    def test_qwen3_5_continuous_train_args_have_no_parser_collisions(self):
+        from transformers import HfArgumentParser
+
+        from joynav.dataset.continuous_vlnn1_action_dataset_args import ContinuousVLNN1ActionDatasetArguments
+        from joynav.model.qwen3_5_trajectory_heads import Qwen35OmegaTrajectoryArguments
+
+        parser = HfArgumentParser((ContinuousVLNN1ActionDatasetArguments, Qwen35OmegaTrajectoryArguments))
+        data_args, model_args = parser.parse_args_into_dataclasses(
+            args=[
+                "--video_folder",
+                "/tmp/vlnn1",
+                "--action_chunk_size",
+                "8",
+                "--trajectory_horizon",
+                "8",
+                "--omega_mode",
+                "text_align_force_qwen",
+            ]
+        )
+
+        self.assertEqual(data_args.action_chunk_size, 8)
+        self.assertEqual(model_args.trajectory_horizon, 8)
+        self.assertEqual(model_args.omega_mode, "text_align_force_qwen")
+
+    def test_qwen3_5_continuous_eval_args_accept_trajectory_overrides(self):
+        import sys
+
+        import joynav.eval.eval_habitat as eval_habitat
+
+        old_argv = sys.argv
+        try:
+            sys.argv = [
+                "prog",
+                "--evaluator_type",
+                "qwen3_5_nextdit_head_sf_omega",
+                "--model_type",
+                "qwen3_5_nextdit_head_sf_omega",
+                "--model_path",
+                "/tmp/model",
+                "--output_path",
+                "/tmp/out",
+                "--trajectory_horizon",
+                "9",
+                "--trajectory_dim",
+                "3",
+                "--nextdit_dim",
+                "8",
+                "--nextdit_layers",
+                "1",
+                "--nextdit_heads",
+                "2",
+                "--nextdit_kv_heads",
+                "2",
+                "--nextdit_num_inference_steps",
+                "2",
+            ]
+            args = eval_habitat.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.trajectory_horizon, 9)
+        self.assertEqual(args.trajectory_dim, 3)
+        self.assertEqual(args.nextdit_dim, 8)
+        self.assertEqual(args.nextdit_num_inference_steps, 2)
+
+    def test_vlnn1_continuous_interleaved_sources_are_multi_turn(self):
+        from joynav.dataset.continuous_vlnn1_action_dataset import ContinuousVLNN1ActionInterleavedDataset
+
+        dataset = ContinuousVLNN1ActionInterleavedDataset.__new__(ContinuousVLNN1ActionInterleavedDataset)
+        dataset.num_history_frames = 2
+        dataset.action_chunk_size = 8
+        dataset.action_dim = 3
+        dataset.trajectory_stride = 3
+        dataset.image_type = "rgb"
+        dataset.episodes_per_chunk = 1000
+        dataset.action_token = "<|action|>"
+        dataset.interleaved_num_chunks = 2
+        dataset.conversations = [
+            {"from": "human", "value": "You are an autonomous navigation assistant. Your task is to <instruction>."},
+            {"from": "gpt", "value": "<|action|>"},
+        ]
+        dataset.list_data_dict = [(0, 0, 0)]
+        chunk = [[0.0, 0.0, 0.0]] + [[float(i), 0.0, 0.0] for i in range(8)]
+        dataset.nav_data = [
+            {
+                "video_folder": "/tmp/vlnn1",
+                "path": "matterport3d_d435i/scene",
+                "id": 7,
+                "chunk_id": "chunk-000",
+                "instructions": ["go"],
+                "continuous_actions": {"0": chunk, "4": chunk, "8": chunk},
+            }
+        ]
+
+        source = dataset.prepare_sources(0)
+
+        self.assertEqual(np.asarray(source["continuous_actions"]).shape, (2, 8, 3))
+        self.assertEqual(len(source["image"]), 2)
+        self.assertEqual(sum(turn["from"] == "gpt" for turn in source["conversations"]), 2)
+        self.assertTrue(all(turn["value"] == "<|action|>" for turn in source["conversations"] if turn["from"] == "gpt"))
+        self.assertIn("episode_000007_000.jpg", source["image"][0])
+        self.assertIn("episode_000007_012.jpg", source["image"][1])
+
+    def test_vlnn1_continuous_collator_preserves_qwen3_5_fields(self):
+        from joynav.dataset.continuous_vlnn1_action_dataset import ContinuousVLNN1ActionCollator
+
+        tokenizer = type("Tokenizer", (), {"pad_token_id": 0, "model_max_length": 16})()
+        collator = ContinuousVLNN1ActionCollator(tokenizer)
+        instances = []
+        for seq_len in [4, 6]:
+            instances.append(
+                {
+                    "input_ids": torch.ones(1, seq_len, dtype=torch.long),
+                    "labels": torch.ones(1, seq_len, dtype=torch.long),
+                    "position_ids": torch.ones(4, 1, seq_len, dtype=torch.long),
+                    "mm_token_type_ids": torch.ones(1, seq_len, dtype=torch.long),
+                    "pixel_values": torch.ones(1, 3),
+                    "image_grid_thw": torch.tensor([[1, 2, 2]]),
+                    "pixel_values_videos": None,
+                    "video_grid_thw": None,
+                    "continuous_actions": torch.ones(8, 3),
+                    "select_mask": torch.zeros(seq_len, dtype=torch.bool),
+                }
+            )
+            instances[-1]["select_mask"][-1] = True
+
+        batch = collator(instances)
+
+        self.assertEqual(batch["input_ids"].shape, (2, 6))
+        self.assertEqual(batch["position_ids"].shape, (4, 2, 6))
+        self.assertEqual(batch["mm_token_type_ids"].shape, (2, 6))
+        self.assertEqual(batch["continuous_actions"].shape, (2, 8, 3))
+        self.assertEqual(batch["select_mask"].shape, (2, 6))
+        self.assertEqual(int(batch["select_mask"].sum()), 2)
+
+    def test_vlnn1_continuous_collator_flattens_interleaved_action_chunks(self):
+        from joynav.dataset.continuous_vlnn1_action_dataset import ContinuousVLNN1ActionCollator
+
+        tokenizer = type("Tokenizer", (), {"pad_token_id": 0, "model_max_length": 16})()
+        collator = ContinuousVLNN1ActionCollator(tokenizer)
+        instances = []
+        for seq_len, chunks in [(5, 2), (7, 3)]:
+            select_mask = torch.zeros(seq_len, dtype=torch.bool)
+            select_mask[:chunks] = True
+            instances.append(
+                {
+                    "input_ids": torch.ones(1, seq_len, dtype=torch.long),
+                    "labels": torch.ones(1, seq_len, dtype=torch.long),
+                    "position_ids": torch.ones(4, 1, seq_len, dtype=torch.long),
+                    "mm_token_type_ids": torch.ones(1, seq_len, dtype=torch.long),
+                    "pixel_values": torch.ones(1, 3),
+                    "image_grid_thw": torch.tensor([[1, 2, 2]]),
+                    "continuous_actions": torch.ones(chunks, 8, 3),
+                    "select_mask": select_mask,
+                }
+            )
+
+        batch = collator(instances)
+
+        self.assertEqual(batch["continuous_actions"].shape, (5, 8, 3))
+        self.assertEqual(int(batch["select_mask"].sum()), 5)
+
+    def test_trajectory_to_discrete_uses_step_size_and_stall_stop(self):
+        from joynav.eval.qwen3_5_omega_trajectory_head_evaluator import trajectory_to_discrete_actions_3d
+
+        forward = torch.tensor([[[0.25, 0.0, 0.0], [0.50, 0.0, 0.0]]])
+        stalled = torch.zeros(1, 8, 3)
+
+        self.assertEqual(
+            trajectory_to_discrete_actions_3d(forward, forward_step=0.25, turn_angle_deg=15.0)[0],
+            [1, 1],
+        )
+        self.assertEqual(
+            trajectory_to_discrete_actions_3d(stalled, forward_step=0.25, turn_angle_deg=15.0)[0],
+            [0],
+        )
+
+    def test_trajectory_to_discrete_sanitizes_nonfinite_predictions(self):
+        from joynav.eval.qwen3_5_omega_trajectory_head_evaluator import trajectory_to_discrete_actions_3d
+
+        nonfinite = torch.tensor(
+            [[[float("nan"), 0.0, float("nan")], [float("inf"), float("-inf"), 0.0]]],
+            dtype=torch.float32,
+        )
+
+        self.assertEqual(
+            trajectory_to_discrete_actions_3d(nonfinite, forward_step=0.25, turn_angle_deg=15.0)[0],
+            [0],
+        )
+
+    def test_qwen3_5_continuous_omega_script_contracts(self):
+        train_mlp = Path("scripts/train/train-qwen3_5-sf-omega-mlp-traj.sh").read_text()
+        train_dit = Path("scripts/train/train-qwen3_5-sf-omega-dit-traj.sh").read_text()
+        train_nextdit = Path("scripts/train/train-qwen3_5-sf-omega-nextdit-traj.sh").read_text()
+        eval_mlp = Path("scripts/eval/eval-qwen3_5-sf-omega-mlp-traj.sh").read_text()
+        eval_dit = Path("scripts/eval/eval-qwen3_5-sf-omega-dit-traj.sh").read_text()
+        eval_nextdit = Path("scripts/eval/eval-qwen3_5-sf-omega-nextdit-traj.sh").read_text()
+
+        self.assertIn("conda activate ${CONDA_ENV:-qwenvln}", train_mlp)
+        self.assertIn("model_type=qwen3_5_mlp_head_sf_omega", train_mlp)
+        self.assertIn("dataset_type=${DATASET_TYPE:-continuous_vlnn1_action_noninterleave_sf_omega}", train_mlp)
+        self.assertIn("--action_chunk_size ${action_chunk_size}", train_mlp)
+        self.assertIn("--trajectory_horizon ${action_chunk_size}", train_mlp)
+        self.assertIn("model_type=qwen3_5_dit_head_sf_omega", train_dit)
+        self.assertIn("--action_chunk_size ${action_chunk_size}", train_dit)
+        self.assertIn("--trajectory_horizon ${action_chunk_size}", train_dit)
+        self.assertIn("MODEL_TYPE=${MODEL_TYPE:-qwen3_5_mlp_head_sf_omega}", eval_mlp)
+        self.assertIn("EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_mlp_head_sf_omega}", eval_mlp)
+        self.assertIn("--trajectory_horizon \"$ACTION_CHUNK_NUM\"", eval_mlp)
+        self.assertIn("MODEL_TYPE=${MODEL_TYPE:-qwen3_5_dit_head_sf_omega}", eval_dit)
+        self.assertIn("EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_dit_head_sf_omega}", eval_dit)
+        self.assertIn("--trajectory_horizon \"$ACTION_CHUNK_NUM\"", eval_dit)
+        self.assertIn("model_type=qwen3_5_nextdit_head_sf_omega", train_nextdit)
+        self.assertIn("gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-2,3}}", train_nextdit)
+        self.assertIn("NPROC_PER_NODE=${NPROC_PER_NODE:-2}", train_nextdit)
+        self.assertIn("num_history=${NUM_HISTORY:-2}", train_nextdit)
+        self.assertIn("--nextdit_dim ${nextdit_dim}", train_nextdit)
+        self.assertIn("--nextdit_num_inference_steps ${nextdit_num_inference_steps}", train_nextdit)
+        self.assertIn("MODEL_TYPE=${MODEL_TYPE:-qwen3_5_nextdit_head_sf_omega}", eval_nextdit)
+        self.assertIn("EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_nextdit_head_sf_omega}", eval_nextdit)
+        self.assertIn("NUM_HISTORY=${NUM_HISTORY:-2}", eval_nextdit)
+        self.assertIn("ACTION_CHUNK_NUM=${ACTION_CHUNK_NUM:-8}", eval_nextdit)
+        self.assertIn("--nextdit_guidance_scale \"$NEXTDIT_GUIDANCE_SCALE\"", eval_nextdit)
 
 
 if __name__ == "__main__":

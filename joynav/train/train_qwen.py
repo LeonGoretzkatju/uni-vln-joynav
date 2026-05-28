@@ -207,6 +207,8 @@ def train(attn_implementation="flash_attention_2"):
         # Keep action_head fully trainable if present
         if hasattr(model, "action_head") and "action_head" not in modules_to_save:
             modules_to_save.append("action_head")
+        if hasattr(model, "action_latent") and "action_latent" not in modules_to_save:
+            modules_to_save.append("action_latent")
         if getattr(model, "spatial_forcing_projector", None) is not None and "spatial_forcing_projector" not in modules_to_save:
             modules_to_save.append("spatial_forcing_projector")
 

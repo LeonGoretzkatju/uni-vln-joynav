@@ -240,11 +240,8 @@ class ActionLatent(nn.Module):
 
         # Beta distribution for noise generation in flow-matching processes
         self.noise_s = config.noise_s
-        # self.beta_dist = Beta(config.noise_beta_alpha, config.noise_beta_beta)
-        self.beta_dist = Beta(
-            torch.tensor(config.noise_beta_alpha, dtype=torch.float32), 
-            torch.tensor(config.noise_beta_beta, dtype=torch.float32)
-        )
+        self.noise_beta_alpha = float(config.noise_beta_alpha)
+        self.noise_beta_beta = float(config.noise_beta_beta)
         self.num_timestep_buckets = config.num_timestep_buckets
 
         # Set trainable parameters based on configuration
@@ -324,7 +321,11 @@ class ActionLatent(nn.Module):
         """
         Beta distribution for noise generation in flow-matching processes.
         """
-        sample = self.beta_dist.sample([batch_size]).to(device, dtype=dtype)
+        beta_dist = Beta(
+            torch.tensor(self.noise_beta_alpha, dtype=torch.float32, device=device),
+            torch.tensor(self.noise_beta_beta, dtype=torch.float32, device=device),
+        )
+        sample = beta_dist.sample([batch_size]).to(device, dtype=dtype)
         # Transform the Beta sample to timestep using the noise scaling factor (noise_s)
         # This maps the sample to [0, 1) range, where:
         # - When sample ≈ noise_s: t_sampled ≈ 0 (early in the flow process, high noise)
