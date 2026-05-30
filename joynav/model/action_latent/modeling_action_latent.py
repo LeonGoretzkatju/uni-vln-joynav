@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +7,13 @@ from typing import Optional
 from torch.distributions import Beta
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
-from .module_utils import TimestepEncoder, CategorySpecificMLP, MultiEmbodimentActionEncoder, count_module_params
+from .module_utils import (
+    TimestepEncoder,
+    CategorySpecificLinear,
+    CategorySpecificMLP,
+    MultiEmbodimentActionEncoder,
+    count_module_params,
+)
 from .perceiver_module import PerceiverAttentionBlock
 from .attention_utils import SelfAttentionTransformer
 
@@ -260,7 +268,6 @@ class ActionLatent(nn.Module):
         for p in self.parameters():
             p.requires_grad = True
         if not self.tune_projector:
-            self.state_encoder.requires_grad_(False)
             self.action_encoder.requires_grad_(False)
             self.action_decoder.requires_grad_(False)
             self.position_embedding.requires_grad_(False)
@@ -298,9 +305,11 @@ class ActionLatent(nn.Module):
                 nn.init.ones_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
-        # elif isinstance(module, nn.MultiheadAttention):
-        #     # This uses torch's original init
-        #     module._reset_parameters()
+        elif isinstance(module, CategorySpecificLinear):
+            module.W.data.normal_(mean=0.0, std=self.config.initializer_range)
+            module.b.data.zero_()
+        elif isinstance(module, nn.MultiheadAttention):
+            module._reset_parameters()
 
     def set_frozen_modules_to_eval_mode(self):
         """
@@ -310,7 +319,6 @@ class ActionLatent(nn.Module):
         """
         if self.training:
             if not self.tune_projector:
-                self.state_encoder.eval()
                 self.action_encoder.eval()
                 self.action_decoder.eval()
                 self.position_embedding.eval()
@@ -330,7 +338,7 @@ class ActionLatent(nn.Module):
         # This maps the sample to [0, 1) range, where:
         # - When sample ≈ noise_s: t_sampled ≈ 0 (early in the flow process, high noise)
         # - When sample ≈ 0: t_sampled ≈ 1 (late in the flow process, low noise)
-        t_sampled = (self.noise_s - sample) / self.noise_s
+        t_sampled = ((self.noise_s - sample) / self.noise_s).clamp_(0.0, 1.0)
         return t_sampled
 
     def prepare_input(self, batch: dict) -> BatchFeature:
@@ -398,8 +406,41 @@ class ActionLatent(nn.Module):
         if action_mask.dim() == 2:
             action_mask = action_mask[...,None].expand_as(velocity)
 
-        loss = F.mse_loss(pred_actions, velocity, reduction="none") * action_mask
-        loss = loss.sum() / action_mask.sum()
+        action_mask = action_mask.to(dtype=torch.float32)
+        loss = F.mse_loss(pred_actions.float(), velocity.float(), reduction="none") * action_mask
+        loss = loss.sum() / action_mask.sum().clamp_min(1.0)
+        debug_loss = os.environ.get("JOYNAV_ACTION_LATENT_DEBUG") == "1" or not bool(torch.isfinite(loss).detach().cpu())
+        if debug_loss:
+            rank = os.environ.get("RANK", "?")
+
+            def stats(name, tensor):
+                tensor = tensor.detach()
+                finite = torch.isfinite(tensor)
+                finite_count = int(finite.sum().item())
+                total_count = tensor.numel()
+                if finite_count:
+                    values = tensor[finite].float()
+                    value_stats = (
+                        f"min={float(values.min().cpu()):.6g} "
+                        f"max={float(values.max().cpu()):.6g} "
+                        f"mean={float(values.mean().cpu()):.6g}"
+                    )
+                else:
+                    value_stats = "no finite values"
+                print(
+                    f"[rank {rank}] ActionLatent {name}: "
+                    f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+                    f"finite={finite_count}/{total_count} {value_stats}",
+                    flush=True,
+                )
+
+            stats("vl_embeds", vl_embeds)
+            stats("action_features", action_features)
+            stats("model_output", model_output)
+            stats("pred_actions", pred_actions)
+            stats("velocity", velocity)
+            stats("action_mask", action_mask)
+            stats("loss", loss)
         output_dict = {
             "loss": loss,
         }

@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -5,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.feature_extraction_utils import BatchFeature
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .action_latent.modeling_action_latent import ActionLatent, ActionLatent_Config
@@ -83,41 +85,91 @@ class TrajectoryDiTHead(nn.Module):
     def action_dim(self) -> int:
         return self.action_latent.action_dim
 
-    def forward(self, vl_features: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _normalize_vl_features(self, vl_features: torch.Tensor) -> torch.Tensor:
         if vl_features.dim() == 2:
             vl_features = vl_features.unsqueeze(1)
         if vl_features.dim() != 3:
             raise ValueError(f"vl_features must be [B,H] or [B,S,H], got {tuple(vl_features.shape)}")
+        return vl_features
 
+    def _embodiment_id(self, batch_size: int, device, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if embodiment_id is None:
+            return torch.zeros(batch_size, device=device, dtype=torch.long)
+        return embodiment_id.to(device=device, dtype=torch.long)
+
+    def _backbone_output(self, vl_features: torch.Tensor) -> BatchFeature:
+        vl_features = self._normalize_vl_features(vl_features)
+        return BatchFeature(
+            data={
+                "backbone_features": vl_features,
+                "backbone_attention_mask": torch.ones(
+                    vl_features.shape[:2],
+                    device=vl_features.device,
+                    dtype=torch.bool,
+                ),
+            }
+        )
+
+    def _action_input(
+        self,
+        target_actions: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> BatchFeature:
+        if (
+            target_actions.dim() != 3
+            or target_actions.shape[1] != self.action_horizon
+            or target_actions.shape[-1] != self.action_dim
+        ):
+            raise ValueError(
+                f"target_actions must be [B,{self.action_horizon},{self.action_dim}], got {tuple(target_actions.shape)}"
+            )
+        if action_mask is None:
+            action_mask = torch.ones(
+                target_actions.shape[:2],
+                device=target_actions.device,
+                dtype=target_actions.dtype,
+            )
+        else:
+            action_mask = action_mask.to(device=target_actions.device, dtype=target_actions.dtype)
+        return BatchFeature(
+            data={
+                "action": target_actions,
+                "action_mask": action_mask,
+                "embodiment_id": self._embodiment_id(target_actions.shape[0], target_actions.device, embodiment_id),
+            }
+        )
+
+    def flow_matching_loss(
+        self,
+        vl_features: torch.Tensor,
+        target_actions: torch.Tensor,
+        embodiment_id: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        vl_features = self._normalize_vl_features(vl_features)
+        target_actions = target_actions.to(device=vl_features.device, dtype=vl_features.dtype)
+        output = self.action_latent(
+            backbone_output=self._backbone_output(vl_features),
+            action_input=self._action_input(target_actions, embodiment_id=embodiment_id, action_mask=action_mask),
+        )
+        return output["loss"]
+
+    @torch.no_grad()
+    def forward(self, vl_features: torch.Tensor, embodiment_id: Optional[torch.Tensor] = None) -> torch.Tensor:
+        vl_features = self._normalize_vl_features(vl_features)
         action_latent = self.action_latent
-        action_latent.set_frozen_modules_to_eval_mode()
         batch_size = vl_features.shape[0]
         device = vl_features.device
-        if embodiment_id is None:
-            embodiment_id = torch.zeros(batch_size, device=device, dtype=torch.long)
-        else:
-            embodiment_id = embodiment_id.to(device=device, dtype=torch.long)
-
-        vl_embeds = action_latent.vl_encoder(vl_features)
-        timesteps = torch.zeros(batch_size, device=device, dtype=torch.long)
-        action_seed = torch.zeros(
-            batch_size,
-            action_latent.action_horizon,
-            action_latent.action_dim,
-            device=device,
-            dtype=vl_embeds.dtype,
+        output = action_latent.get_action(
+            backbone_output=self._backbone_output(vl_features),
+            action_input=BatchFeature(
+                data={
+                    "embodiment_id": self._embodiment_id(batch_size, device, embodiment_id),
+                }
+            ),
         )
-        action_features = action_latent.action_encoder(action_seed, timesteps, embodiment_id)
-        pos_ids = torch.arange(action_features.shape[1], dtype=torch.long, device=device)
-        action_features = action_features + action_latent.position_embedding(pos_ids).unsqueeze(0)
-
-        model_output = action_latent.perceiver_net(
-            latents=action_features,
-            visual_language_states=vl_embeds,
-            timestep=timesteps,
-        )
-        pred = action_latent.action_decoder(model_output, embodiment_id)
-        return pred[:, -action_latent.action_horizon :]
+        return output["action_pred"]
 
 
 class SinusoidalPositionalEncoding(nn.Module):
@@ -317,6 +369,29 @@ class Qwen35OmegaTrajectoryArguments(JoyNav_Qwen3_5OmegaSpatialForcingArguments)
 
 
 class Qwen35OmegaTrajectoryMixin:
+    def post_update_model(self):
+        parent_post_update = getattr(super(), "post_update_model", None)
+        if parent_post_update is not None:
+            parent_post_update()
+
+        loading_info = getattr(self, "_hf_loading_info", {}) or {}
+        missing_keys = loading_info.get("missing_keys", []) or []
+        action_missing = any(
+            key.startswith("action_head.") or key.startswith("action_latent.")
+            for key in missing_keys
+        )
+        if not action_missing:
+            return
+
+        action_latent = getattr(self, "action_latent", None)
+        if action_latent is not None and hasattr(action_latent, "init_weights"):
+            action_latent.init_weights()
+            return
+
+        action_head = getattr(self, "action_head", None)
+        if action_head is not None:
+            action_head.apply(self._init_weights)
+
     def _trajectory_args(self):
         return getattr(self, "model_args", self.config)
 
@@ -350,6 +425,15 @@ class Qwen35OmegaTrajectoryMixin:
             )
             sf_loss = spatial_forcing_loss * self.sf_alpha
             outputs.loss = sf_loss if outputs.loss is None else outputs.loss + sf_loss
+            debug_loss = os.environ.get("JOYNAV_TRAJ_DEBUG") == "1" or not bool(torch.isfinite(spatial_forcing_loss).detach().cpu())
+            if debug_loss:
+                rank = os.environ.get("RANK", "?")
+                print(
+                    f"[rank {rank}] trajectory spatial_forcing_loss="
+                    f"{float(spatial_forcing_loss.detach().float().cpu()):.6g} "
+                    f"sf_alpha={float(self.sf_alpha):.6g}",
+                    flush=True,
+                )
         outputs.spatial_forcing_loss = spatial_forcing_loss.detach() if spatial_forcing_loss is not None else None
         return outputs
 
@@ -465,12 +549,22 @@ class JoyNav_Qwen3_5OmegaDiTForCausalLM(
             features = hidden_states if getattr(model_args, "propagate_action_head_grad", True) else hidden_states.detach()
             selected_features = select_action_token_features(features, select_mask)
             target_actions = self._normalize_target_actions(continuous_actions, selected_features.shape[0])
-            target_actions = target_actions.to(device=features.device, dtype=features.dtype)
-            pred_actions = self.action_head(selected_features)
-            action_loss = trajectory_mse_loss(pred_actions, target_actions)
+            action_loss = self.action_head.flow_matching_loss(selected_features, target_actions)
+            debug_loss = os.environ.get("JOYNAV_TRAJ_DEBUG") == "1" or not bool(torch.isfinite(action_loss).detach().cpu())
+            if debug_loss:
+                rank = os.environ.get("RANK", "?")
+                selected_finite = int(torch.isfinite(selected_features).sum().item())
+                target_finite = int(torch.isfinite(target_actions).sum().item())
+                print(
+                    f"[rank {rank}] DiT action_loss={float(action_loss.detach().float().cpu()):.6g} "
+                    f"selected_features={tuple(selected_features.shape)} "
+                    f"finite={selected_finite}/{selected_features.numel()} "
+                    f"target_actions={tuple(target_actions.shape)} "
+                    f"finite={target_finite}/{target_actions.numel()}",
+                    flush=True,
+                )
             weighted = action_loss * float(getattr(model_args, "action_head_loss_weight", 1.0))
             outputs.loss = weighted if outputs.loss is None else outputs.loss + weighted
-            outputs.action_pred = pred_actions
 
         outputs = self._add_spatial_forcing_loss(outputs, kwargs, sf_image_tensors)
         outputs.action_loss = action_loss.detach() if action_loss is not None else None

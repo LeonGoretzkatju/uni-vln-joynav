@@ -221,7 +221,7 @@ class CategorySpecificLinear(nn.Module):
     def forward(self, x, cat_ids):
         selected_W = self.W[cat_ids]
         selected_b = self.b[cat_ids]
-        return torch.matmul(x, selected_W) + selected_b
+        return torch.matmul(x, selected_W) + selected_b.unsqueeze(-2)
 
 
 class CategorySpecificMLP(nn.Module):
@@ -281,4 +281,3 @@ class MultiEmbodimentActionEncoder(nn.Module):
         # 5) Finally W3 => (B, T, w)
         x = self.W3(x, cat_ids)
         return x
-

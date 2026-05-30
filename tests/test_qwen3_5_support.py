@@ -840,12 +840,11 @@ class Qwen35SupportTest(unittest.TestCase):
 
         self.assertLess(float(loss), 0.02)
 
-    def test_trajectory_dit_head_uses_waypoint_mse_contract(self):
+    def test_trajectory_dit_head_uses_action_latent_flow_contract(self):
         from joynav.model.action_latent.modeling_action_latent import ActionLatent_Config
         from joynav.model.qwen3_5_trajectory_heads import (
             TrajectoryDiTHead,
             select_action_token_features,
-            trajectory_mse_loss,
         )
 
         config = ActionLatent_Config(
@@ -870,14 +869,15 @@ class Qwen35SupportTest(unittest.TestCase):
         target = torch.randn(2, 2, 3)
 
         selected = select_action_token_features(hidden_states, select_mask)
-        pred = TrajectoryDiTHead(config)(selected)
-        loss = trajectory_mse_loss(pred, target)
+        head = TrajectoryDiTHead(config)
+        loss = head.flow_matching_loss(selected, target)
+        pred = head(selected)
 
         self.assertEqual(selected.shape, (2, 4))
         self.assertEqual(pred.shape, target.shape)
         self.assertTrue(torch.isfinite(loss))
 
-    def test_qwen3_5_dit_trajectory_forward_uses_wrapped_mse(self):
+    def test_qwen3_5_dit_trajectory_forward_uses_action_latent_flow_loss(self):
         import inspect
 
         from joynav.model.qwen3_5_trajectory_heads import JoyNav_Qwen3_5OmegaDiTForCausalLM
@@ -885,8 +885,8 @@ class Qwen35SupportTest(unittest.TestCase):
         source = inspect.getsource(JoyNav_Qwen3_5OmegaDiTForCausalLM.forward)
 
         self.assertIn("selected_features = select_action_token_features(features, select_mask)", source)
-        self.assertIn("trajectory_mse_loss(pred_actions, target_actions)", source)
-        self.assertNotIn("self.action_latent(", source)
+        self.assertIn("self.action_head.flow_matching_loss(selected_features, target_actions)", source)
+        self.assertNotIn("trajectory_mse_loss(pred_actions, target_actions)", source)
 
     def test_nextdit_trajectory_modules_import(self):
         from diffusers import FlowMatchEulerDiscreteScheduler
@@ -965,6 +965,34 @@ class Qwen35SupportTest(unittest.TestCase):
             module = ActionLatent(config)
 
         self.assertEqual(module.action_horizon, 2)
+
+    def test_action_latent_can_freeze_projector_without_state_encoder(self):
+        from joynav.model.action_latent.modeling_action_latent import ActionLatent, ActionLatent_Config
+
+        config = ActionLatent_Config(
+            time_channel=8,
+            time_embedding_dim=16,
+            latent_dim=16,
+            vl_input_dim=16,
+            heads=4,
+            layers=1,
+            output_dim=16,
+            action_dim=3,
+            action_hidden_dim=16,
+            vl_heads=4,
+            vl_self_layers=1,
+            max_seq_len=8,
+            action_horizon=2,
+            tune_projector=False,
+        )
+
+        module = ActionLatent(config)
+        module.train()
+        module.set_frozen_modules_to_eval_mode()
+
+        self.assertFalse(any(p.requires_grad for p in module.action_encoder.parameters()))
+        self.assertFalse(any(p.requires_grad for p in module.action_decoder.parameters()))
+        self.assertFalse(module.position_embedding.weight.requires_grad)
 
     def test_qwen3_5_continuous_omega_model_types_are_registered(self):
         import joynav.model  # noqa: F401
