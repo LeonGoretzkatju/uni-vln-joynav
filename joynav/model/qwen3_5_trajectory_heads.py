@@ -352,6 +352,8 @@ class TrajectoryNextDiTHead(nn.Module):
 class Qwen35OmegaTrajectoryArguments(JoyNav_Qwen3_5OmegaSpatialForcingArguments):
     propagate_action_head_grad: bool = field(default=True)
     action_head_loss_weight: float = field(default=1.0)
+    stop_head_loss_weight: float = field(default=1.0)
+    stop_pos_weight: float = field(default=1.0)
     trajectory_horizon: int = field(default=8)
     trajectory_dim: int = field(default=3)
     action_head_hidden_dim: Optional[int] = field(default=None)
@@ -369,6 +371,44 @@ class Qwen35OmegaTrajectoryArguments(JoyNav_Qwen3_5OmegaSpatialForcingArguments)
 
 
 class Qwen35OmegaTrajectoryMixin:
+    def _build_stop_head(self, hidden_size: int):
+        """Binary STOP/arrival classifier on the action-token hidden state.
+
+        Shared by all trajectory heads so STOP supervision is decoupled from the
+        (x, y, yaw) regression / flow-matching head.
+        """
+        self.stop_head = nn.Linear(int(hidden_size), 1)
+        self._init_stop_head_weights()
+
+    def _init_stop_head_weights(self, init_bias: float = -2.0):
+        # Negative bias -> low initial stop probability so the agent does not stop
+        # at step 0 before training shapes the head.
+        nn.init.normal_(self.stop_head.weight, mean=0.0, std=0.02)
+        nn.init.constant_(self.stop_head.bias, float(init_bias))
+
+    def _compute_stop_loss(self, selected_features: torch.Tensor, stop_targets: torch.Tensor) -> torch.Tensor:
+        stop_logits = self.stop_head(selected_features).squeeze(-1).float()
+        stop_targets = stop_targets.to(device=stop_logits.device, dtype=torch.float32).reshape(-1)
+        if stop_targets.shape != stop_logits.shape:
+            raise ValueError(
+                f"stop_targets shape {tuple(stop_targets.shape)} does not match stop_logits {tuple(stop_logits.shape)}"
+            )
+        pos_weight_val = float(getattr(self._trajectory_args(), "stop_pos_weight", 1.0))
+        pos_weight = torch.tensor(pos_weight_val, device=stop_logits.device) if pos_weight_val != 1.0 else None
+        return F.binary_cross_entropy_with_logits(stop_logits, stop_targets, pos_weight=pos_weight)
+
+    def _predict_stop_logit(self, last_hidden: torch.Tensor) -> torch.Tensor:
+        return self.stop_head(last_hidden).squeeze(-1)
+
+    def _apply_stop_loss(self, outputs, selected_features: torch.Tensor, stop_targets):
+        stop_loss = None
+        if stop_targets is not None:
+            stop_loss = self._compute_stop_loss(selected_features, stop_targets)
+            weighted = stop_loss * float(getattr(self._trajectory_args(), "stop_head_loss_weight", 1.0))
+            outputs.loss = weighted if outputs.loss is None else outputs.loss + weighted
+        outputs.stop_loss = stop_loss.detach() if stop_loss is not None else None
+        return stop_loss
+
     def post_update_model(self):
         parent_post_update = getattr(super(), "post_update_model", None)
         if parent_post_update is not None:
@@ -376,6 +416,12 @@ class Qwen35OmegaTrajectoryMixin:
 
         loading_info = getattr(self, "_hf_loading_info", {}) or {}
         missing_keys = loading_info.get("missing_keys", []) or []
+
+        if getattr(self, "stop_head", None) is not None and any(
+            key.startswith("stop_head.") for key in missing_keys
+        ):
+            self._init_stop_head_weights()
+
         action_missing = any(
             key.startswith("action_head.") or key.startswith("action_latent.")
             for key in missing_keys
@@ -470,8 +516,9 @@ class JoyNav_Qwen3_5OmegaMLPForCausalLM(
             num_points=self.action_chunk_size,
             point_dim=self.action_dim,
         )
+        self._build_stop_head(hidden_size)
 
-    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, **kwargs):
+    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, stop_targets=None, **kwargs):
         self._prepare_trajectory_forward(kwargs)
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
 
@@ -487,6 +534,7 @@ class JoyNav_Qwen3_5OmegaMLPForCausalLM(
             weighted = action_loss * float(getattr(model_args, "action_head_loss_weight", 1.0))
             outputs.loss = weighted if outputs.loss is None else outputs.loss + weighted
             outputs.action_pred = pred_actions
+            self._apply_stop_loss(outputs, selected_features, stop_targets)
 
         outputs = self._add_spatial_forcing_loss(outputs, kwargs, sf_image_tensors)
         outputs.action_loss = action_loss.detach() if action_loss is not None else None
@@ -499,6 +547,7 @@ class JoyNav_Qwen3_5OmegaMLPForCausalLM(
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
         hidden_states = self._trajectory_hidden_states(outputs)
         outputs.action_pred = self.action_head(hidden_states[:, -1])
+        outputs.stop_logit = self._predict_stop_logit(hidden_states[:, -1])
         return outputs
 
 
@@ -537,8 +586,9 @@ class JoyNav_Qwen3_5OmegaDiTForCausalLM(
         self.config.action_latent_config = latent_config.to_dict()
         self.action_head = TrajectoryDiTHead(latent_config)
         self.action_latent = self.action_head.action_latent
+        self._build_stop_head(hidden_size)
 
-    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, **kwargs):
+    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, stop_targets=None, **kwargs):
         self._prepare_trajectory_forward(kwargs)
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
 
@@ -565,6 +615,7 @@ class JoyNav_Qwen3_5OmegaDiTForCausalLM(
                 )
             weighted = action_loss * float(getattr(model_args, "action_head_loss_weight", 1.0))
             outputs.loss = weighted if outputs.loss is None else outputs.loss + weighted
+            self._apply_stop_loss(outputs, selected_features, stop_targets)
 
         outputs = self._add_spatial_forcing_loss(outputs, kwargs, sf_image_tensors)
         outputs.action_loss = action_loss.detach() if action_loss is not None else None
@@ -577,6 +628,7 @@ class JoyNav_Qwen3_5OmegaDiTForCausalLM(
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
         hidden_states = self._trajectory_hidden_states(outputs)
         outputs.action_pred = self.action_head(hidden_states[:, -1])
+        outputs.stop_logit = self._predict_stop_logit(hidden_states[:, -1])
         return outputs
 
 
@@ -605,8 +657,9 @@ class JoyNav_Qwen3_5OmegaNextDiTForCausalLM(
             num_sample_trajs=int(getattr(config, "nextdit_num_sample_trajs", 1)),
             guidance_scale=float(getattr(config, "nextdit_guidance_scale", 1.0)),
         )
+        self._build_stop_head(hidden_size)
 
-    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, **kwargs):
+    def forward(self, *args, sf_image_tensors=None, continuous_actions=None, select_mask=None, stop_targets=None, **kwargs):
         self._prepare_trajectory_forward(kwargs)
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
 
@@ -620,6 +673,7 @@ class JoyNav_Qwen3_5OmegaNextDiTForCausalLM(
             action_loss = self.action_head.flow_matching_loss(selected_features, target_actions)
             weighted = action_loss * float(getattr(model_args, "action_head_loss_weight", 1.0))
             outputs.loss = weighted if outputs.loss is None else outputs.loss + weighted
+            self._apply_stop_loss(outputs, selected_features, stop_targets)
 
         outputs = self._add_spatial_forcing_loss(outputs, kwargs, sf_image_tensors)
         outputs.action_loss = action_loss.detach() if action_loss is not None else None
@@ -632,4 +686,5 @@ class JoyNav_Qwen3_5OmegaNextDiTForCausalLM(
         outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
         hidden_states = self._trajectory_hidden_states(outputs)
         outputs.action_pred = self.action_head(hidden_states[:, -1])
+        outputs.stop_logit = self._predict_stop_logit(hidden_states[:, -1])
         return outputs

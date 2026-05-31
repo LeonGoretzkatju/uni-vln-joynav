@@ -87,6 +87,8 @@ def trajectory_to_discrete_actions_3d(
 class Qwen3_5OmegaTrajectoryEvaluatorArguments(Qwen3_5OmegaSpatialForcingEvaluatorArguments):
     action_chunk_num: int = field(default=8)
     stall_distance: float = field(default=0.05)
+    stop_threshold: float = field(default=0.5, metadata={"help": "sigmoid(stop_logit) above this emits STOP."})
+    replan_every: int = field(default=2, metadata={"help": "Execute this many discrete actions before re-planning (receding horizon)."})
     trajectory_horizon: int = field(default=8)
     trajectory_dim: int = field(default=3)
     action_head_hidden_dim: Optional[int] = field(default=None)
@@ -128,12 +130,14 @@ class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Match the ContinuousVLNN1ActionDataset training prompt wording so the
+        # evaluation context distribution lines up with what the head was trained on.
         self.conversation = [
             {
                 "from": "human",
                 "value": (
                     "You are an autonomous navigation assistant. Your task is to <instruction>. "
-                    "Predict the next ego-centric trajectory waypoints."
+                    "Based on the historical observations, predict the next ego-centric trajectory waypoints."
                 ),
             }
         ]
@@ -180,6 +184,19 @@ class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
             max_actions=int(self.action_chunk_num),
             stall_distance=float(self.args.stall_distance),
         )[0]
+
+    def _should_stop(self, outputs) -> bool:
+        """Learned STOP: emit STOP when the stop head is confident."""
+        stop_logit = getattr(outputs, "stop_logit", None)
+        if stop_logit is None and isinstance(outputs, dict):
+            stop_logit = outputs.get("stop_logit")
+        if stop_logit is None:
+            return False
+        stop_logit = stop_logit.detach().float().reshape(-1)
+        if stop_logit.numel() == 0:
+            return False
+        stop_prob = torch.sigmoid(stop_logit[0]).item()
+        return stop_prob > float(self.args.stop_threshold)
 
     def eval_action(self, idx) -> None:
         self.model.eval()
@@ -229,8 +246,6 @@ class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
                 initial_height = env.sim.get_agent_state().position[1]
                 rgb_list = []
                 action_seq = []
-                previous_assistant_text = None
-                source = {"image": [], "conversations": []}
 
                 while not env.episode_over and step_id <= 500:
                     rgb = observations["rgb"]
@@ -255,9 +270,11 @@ class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
                         vis_frames.append(observations_to_image({"rgb": np.asarray(image)}, info))
 
                     if len(action_seq) == 0:
-                        inputs, source = self.prepare_inputs_no_cache(
-                            source,
-                            previous_assistant_text,
+                        # Non-interleaved head: each re-plan is a fresh single-turn prompt
+                        # (instruction + sparse history + current frame), matching training.
+                        inputs, _ = self.prepare_inputs_no_cache(
+                            {"image": [], "conversations": []},
+                            None,
                             step_id,
                             episode,
                             rgb_list,
@@ -268,18 +285,20 @@ class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
                         action_pred = getattr(outputs, "action_pred", None)
                         if action_pred is None and isinstance(outputs, dict):
                             action_pred = outputs["action_pred"]
-                        action_seq = self.parse_trajectory_actions(action_pred)
-                        previous_assistant_text = self.action_token
-                        if len(action_seq) > self.action_chunk_num:
-                            action_seq = action_seq[: self.action_chunk_num]
-                        if len(action_seq) == 0:
+                        if self._should_stop(outputs):
                             action_seq = [0]
+                        else:
+                            action_seq = self.parse_trajectory_actions(action_pred)
+                            # Receding horizon: execute only the first replan_every actions,
+                            # then re-observe and re-plan (re-checks STOP each time).
+                            replan_every = max(int(self.args.replan_every), 1)
+                            if len(action_seq) > replan_every:
+                                action_seq = action_seq[:replan_every]
+                            if len(action_seq) == 0:
+                                action_seq = [0]
 
                     observations = env.step(action_seq.pop(0))
                     step_id += 1
-                    if self.should_reset_interleaved_source(step_id):
-                        previous_assistant_text = None
-                        source = {"image": [], "conversations": []}
 
                 process_bar.update(1)
                 metrics = env.get_metrics()

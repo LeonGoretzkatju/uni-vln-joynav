@@ -583,3 +583,58 @@ JOYNAV_ACTION_LATENT_DEBUG=1 JOYNAV_TRAJ_DEBUG=1
 
 and inspect whether selected Qwen hidden states, target actions, ActionLatent
 features, model output, predicted actions, and loss are finite.
+
+## Learnable STOP fix (2026-05-31)
+
+Root problem found: the continuous-trajectory heads had **no STOP mechanism**, so
+SR was structurally 0 (the agent passes goals but never stops). Three gaps, all
+now fixed end-to-end:
+
+1. Data (`joynav/dataset/vlnn1_annotation_utils.py::build_continuous_actions`):
+   previously dropped the final `future_len` frames (`max_start = T-(future_len+1)`),
+   so the goal-approach/arrival region was never trained and there was no stop label.
+   Now emits chunks for the **full** episode (padding the future with the last pose ->
+   zero-motion "arrived" target) and returns `stop_flags[str(step)]` (1.0 when
+   `last_index - step <= stop_window`, default `stop_window = future_len`). Return is
+   now a 3-tuple `(continuous_actions, stop_flags, action_results)`; `ActionChunkResult`
+   gained a `stop` field. `scripts/data/create-vlnn1-annotations.py` writes `stop_flags`,
+   adds `--stop-window`, and bumps schema to `vlnn1_ego_xyz_yaw_stop_v1`.
+   **Annotations must be regenerated** (old files lack the goal region/labels); the
+   dataset has a geometry fallback so old files don't crash. Regenerated InternData-N1
+   annotations: 740 chunks (was 636), 15.5% stop-positive, schema `..._stop_v1`. The v1
+   files are backed up next to them as `annotations.json.v1.bak` / `annotations_meta.json.v1.bak`.
+
+2. Dataset (`joynav/dataset/continuous_vlnn1_action_dataset.py`): `prepare_sources`
+   (interleaved + non-interleaved) attach `stop_targets`; `_get_item` adds them (with
+   `_derive_stop_targets` fallback); `ContinuousVLNN1ActionCollator` concatenates
+   `stop_targets` in the same selection order as `continuous_actions`.
+
+3. Model (`joynav/model/qwen3_5_trajectory_heads.py`): added a shared
+   `stop_head = Linear(hidden, 1)` in `Qwen35OmegaTrajectoryMixin` (built in all three
+   MLP/DiT/NextDiT `__init__`s, reinit in `post_update_model`), BCE-with-logits stop
+   loss (`stop_head_loss_weight`, `stop_pos_weight` args; bias init -2 for low initial
+   stop-prob), and `predict_action` now exposes `outputs.stop_logit`.
+
+4. Eval (`joynav/eval/qwen3_5_omega_trajectory_head_evaluator.py`): learned STOP via
+   `_should_stop` (`sigmoid(stop_logit) > stop_threshold`, default 0.5), **receding-horizon**
+   execution (`replan_every`, default 2), and each re-plan is a **fresh single-turn prompt**
+   (instruction + sparse history + current frame) matching non-interleaved training; the
+   evaluator prompt wording was aligned to the dataset prompt. Args wired through the
+   train/eval `*-traj.sh` scripts (`STOP_HEAD_LOSS_WEIGHT`/`STOP_POS_WEIGHT`,
+   `STOP_THRESHOLD`/`REPLAN_EVERY`).
+
+Verification (env `qwenvln`, GPUs 1,2): 75 unit tests pass except one pre-existing
+stale assertion (`checkpoint-36000` vs actual `40270` in the unrelated discrete
+`eval-qwen3_5-sf-omega.sh`); MLP 20-step smoke train finite (`train_loss≈1.59`, stop
+loss included, no NaN); 10-ep eval runs end-to-end with no crash. At the 20-step
+checkpoint STOP does not fire at threshold 0.5 (head is massively undertrained: ~3
+stop-positive samples seen) so all episodes hit the 300-step cap (SR 0, same NE≈7.5 as
+before) — i.e. no spurious early stop; a low-threshold (0.3) 3-ep run terminates
+episodes at step 1, confirming the decode->STOP->terminate wiring. Real SR gains require
+a proper (non-smoke) training run.
+
+Note: the older `qwen3_vl` discrete path (`joynav/dataset/vln_action_dataset.py::transform_action_chunk`)
+already used a continuous format **with** an `is_stop` dim `[x,y,cosθ,sinθ,is_stop]`; the
+VLNN1 3-dim `[x,y,yaw]` reformulation dropped it — that is the regression this fix
+reverses, and it is a ready template for Phase 2 (R2R/RxR discrete->continuous co-training,
+still pending).

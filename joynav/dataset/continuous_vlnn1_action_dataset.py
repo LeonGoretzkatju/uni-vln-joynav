@@ -90,6 +90,24 @@ class ContinuousVLNN1ActionDataset(LazySupervisedDataset):
     def _get_action_array(self, item: Dict, step: int) -> np.ndarray:
         return np.asarray(item["continuous_actions"][str(step)], dtype=np.float32)
 
+    def _get_stop_flags(self, item: Dict, steps: List[int]) -> np.ndarray | None:
+        """Per-chunk stop labels (1.0 near the goal) aligned with ``steps``.
+
+        Returns ``None`` when the annotation predates the stop-flag schema so the
+        caller can fall back to a geometry-derived label.
+        """
+        stop_flags = item.get("stop_flags")
+        if not stop_flags:
+            return None
+        return np.asarray([float(stop_flags.get(str(step), 0.0)) for step in steps], dtype=np.float32)
+
+    @staticmethod
+    def _derive_stop_targets(continuous_actions: torch.Tensor, eps: float = 0.05) -> torch.Tensor:
+        """Fallback stop label: a chunk with ~zero future translation is a stop."""
+        actions = continuous_actions if continuous_actions.dim() == 3 else continuous_actions.unsqueeze(0)
+        max_disp = torch.linalg.norm(actions[..., :2], dim=-1).amax(dim=-1)
+        return (max_disp < eps).float()
+
     def _sorted_valid_steps(self, item: Dict) -> List[int]:
         valid_steps = []
         expected_shape = (self.action_chunk_size + 1, self.action_dim)
@@ -180,6 +198,7 @@ class ContinuousVLNN1ActionDataset(LazySupervisedDataset):
 
         all_actions = self._get_action_array(item, step)
         continuous_actions = all_actions[1:]
+        stop_targets = self._get_stop_flags(item, [step])
 
         history_frames = [
             self._get_frame_path(item["video_folder"], item, step_idx)
@@ -197,11 +216,13 @@ class ContinuousVLNN1ActionDataset(LazySupervisedDataset):
             "image": history_frames,
             "conversations": conversations,
             "continuous_actions": continuous_actions,
+            "stop_targets": stop_targets,
         }
 
     def _get_item(self, sources) -> Dict[str, torch.Tensor]:
         source = copy.deepcopy(sources[0] if isinstance(sources, list) else sources)
         continuous_actions = torch.as_tensor(source.pop("continuous_actions"), dtype=torch.float32)
+        stop_targets = source.pop("stop_targets", None)
         data_dict = super()._get_item([source])
 
         input_ids = data_dict["input_ids"][0]
@@ -213,8 +234,14 @@ class ContinuousVLNN1ActionDataset(LazySupervisedDataset):
                 f"found {int(select_mask.sum().item())}"
             )
 
+        if stop_targets is None:
+            stop_targets = self._derive_stop_targets(continuous_actions)
+        else:
+            stop_targets = torch.as_tensor(stop_targets, dtype=torch.float32).reshape(-1)
+
         data_dict["continuous_actions"] = continuous_actions
         data_dict["select_mask"] = select_mask
+        data_dict["stop_targets"] = stop_targets
         return data_dict
 
 
@@ -230,6 +257,7 @@ class ContinuousVLNN1ActionInterleavedDataset(ContinuousVLNN1ActionDataset):
             [self._get_action_array(item, selected_step)[1:] for selected_step in selected_steps],
             axis=0,
         )
+        stop_targets = self._get_stop_flags(item, selected_steps)
 
         history_frames = [
             self._get_frame_path(item["video_folder"], item, step_idx)
@@ -263,6 +291,7 @@ class ContinuousVLNN1ActionInterleavedDataset(ContinuousVLNN1ActionDataset):
             "image": image_files,
             "conversations": conversations,
             "continuous_actions": continuous_actions,
+            "stop_targets": stop_targets,
         }
 
 
@@ -318,6 +347,7 @@ class ContinuousVLNN1ActionCollator(DataCollatorForSupervisedDataset):
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         continuous_actions = [instance.pop("continuous_actions") for instance in instances]
         select_masks = [instance.pop("select_mask") for instance in instances]
+        stop_targets = [instance.pop("stop_targets") for instance in instances if "stop_targets" in instance]
         sf_image_tensors = [instance.pop("sf_image_tensors") for instance in instances if "sf_image_tensors" in instance]
 
         cleaned_instances = []
@@ -342,6 +372,10 @@ class ContinuousVLNN1ActionCollator(DataCollatorForSupervisedDataset):
             ]
             batch["continuous_actions"] = torch.cat(normalized_actions, dim=0)
         batch["select_mask"] = torch.stack(padded_select_masks, dim=0)
+        if len(stop_targets) == len(continuous_actions):
+            # Flatten in the same (sample, chunk) order as the selected action tokens
+            # so stop_targets[k] aligns with continuous_actions row k.
+            batch["stop_targets"] = torch.cat([target.reshape(-1) for target in stop_targets], dim=0)
         if len(sf_image_tensors) == len(continuous_actions):
             batch["sf_image_tensors"] = sf_image_tensors
         return batch

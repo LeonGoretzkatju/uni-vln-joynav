@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def convert_to_annotations(input_path, output_path, future_action_chunk_size, step_stride, trajectory_stride):
+def convert_to_annotations(input_path, output_path, future_action_chunk_size, step_stride, trajectory_stride, stop_window=None):
     traj_data_root = resolve_traj_data_root(input_path)
     if traj_data_root is None:
         raise ValueError("input_path must be InternData-N1, vln_n1, or traj_data")
@@ -44,11 +44,12 @@ def convert_to_annotations(input_path, output_path, future_action_chunk_size, st
 
         for episode_idx, (parquet_path, chunk_id) in sorted(parquet_files.items()):
             episode_data = load_episode_data(parquet_path, trajectory_stride=trajectory_stride)
-            continuous_actions, _ = build_continuous_actions(
+            continuous_actions, stop_flags, _ = build_continuous_actions(
                 episode_data.transforms,
                 episode_data.frame_indices,
                 step_stride=step_stride,
                 action_chunk_size=stored_action_chunk_size,
+                stop_window=stop_window,
             )
             if not continuous_actions:
                 continue
@@ -59,6 +60,7 @@ def convert_to_annotations(input_path, output_path, future_action_chunk_size, st
                     "chunk_id": chunk_id,
                     "instructions": instructions.get(int(episode_idx), []),
                     "continuous_actions": continuous_actions,
+                    "stop_flags": stop_flags,
                 }
             )
 
@@ -68,13 +70,15 @@ def convert_to_annotations(input_path, output_path, future_action_chunk_size, st
         json.dump(annotations, file, indent=2, ensure_ascii=False)
 
     meta = {
-        "schema_version": "vlnn1_ego_xyz_yaw_v1",
+        "schema_version": "vlnn1_ego_xyz_yaw_stop_v1",
         "trajectory_stride": trajectory_stride,
         "step_stride": step_stride,
         "future_action_chunk_size": future_action_chunk_size,
         "stored_action_chunk_size": stored_action_chunk_size,
+        "stop_window": stop_window if stop_window is not None else future_action_chunk_size,
         "action_dim": 3,
         "coordinate_frame": "ego_ros_xy_yaw",
+        "has_stop_flags": True,
     }
     with output_path.with_name("annotations_meta.json").open("w", encoding="utf-8") as file:
         json.dump(meta, file, indent=2)
@@ -88,6 +92,12 @@ def main():
     parser.add_argument("--future-action-chunk-size", type=int, default=8)
     parser.add_argument("--step-stride", type=int, default=4)
     parser.add_argument("--trajectory-stride", type=int, default=3)
+    parser.add_argument(
+        "--stop-window",
+        type=int,
+        default=None,
+        help="Chunks within this many frames of the episode end get stop=1 (default: future_action_chunk_size).",
+    )
     args = parser.parse_args()
     convert_to_annotations(
         input_path=args.input_path,
@@ -95,6 +105,7 @@ def main():
         future_action_chunk_size=args.future_action_chunk_size,
         step_stride=args.step_stride,
         trajectory_stride=args.trajectory_stride,
+        stop_window=args.stop_window,
     )
 
 

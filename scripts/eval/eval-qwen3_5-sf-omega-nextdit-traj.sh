@@ -66,6 +66,8 @@ torchrun --nproc_per_node="$NPROC_PER_NODE" \
     --action_chunk_num "$ACTION_CHUNK_NUM" \
     --trajectory_horizon "$ACTION_CHUNK_NUM" \
     --trajectory_dim 3 \
+    --stop_threshold "${STOP_THRESHOLD:-0.5}" \
+    --replan_every "${REPLAN_EVERY:-2}" \
     --nextdit_dim "$NEXTDIT_DIM" \
     --nextdit_layers "$NEXTDIT_LAYERS" \
     --nextdit_heads "$NEXTDIT_HEADS" \

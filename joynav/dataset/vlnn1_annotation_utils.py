@@ -32,6 +32,7 @@ class ActionChunkResult:
     original_frame_idx: int
     actions: List[List[float]]
     future_original_indices: List[int]
+    stop: float = 0.0
 
 
 def resolve_traj_data_root(input_path: str) -> Optional[str]:
@@ -178,12 +179,25 @@ def build_continuous_actions(
     frame_indices: np.ndarray,
     step_stride: int,
     action_chunk_size: int,
-) -> Tuple[Dict[str, List[List[float]]], List[ActionChunkResult]]:
-    """Build ego-centric future waypoint chunks.
+    stop_window: Optional[int] = None,
+) -> Tuple[Dict[str, List[List[float]]], Dict[str, float], List[ActionChunkResult]]:
+    """Build ego-centric future waypoint chunks with per-chunk stop labels.
 
     ``action_chunk_size`` includes the leading zero reference pose. For an
     eight-waypoint target, pass ``action_chunk_size=9`` and drop the first entry
     in the training dataset.
+
+    Chunks are emitted for the **full** episode, including the goal-approach
+    region. When fewer than ``future_len`` future frames remain, the future is
+    padded by repeating the last available pose (zero subsequent ego-motion,
+    i.e. an "arrived / stay-put" target) so every chunk keeps a fixed
+    ``(future_len + 1, 3)`` shape.
+
+    ``stop_flags[str(step)]`` is ``1.0`` when the chunk's prediction horizon
+    reaches the final frame (``last_index - step <= stop_window``; ``stop_window``
+    defaults to ``future_len``), else ``0.0``. This is the region where the agent
+    should begin signalling STOP, and it lines up with the zero-motion padded
+    waypoints above.
     """
     if step_stride <= 0:
         raise ValueError(f"step_stride must be positive, got {step_stride}")
@@ -191,38 +205,56 @@ def build_continuous_actions(
         raise ValueError(f"action_chunk_size must be at least 1, got {action_chunk_size}")
 
     continuous_actions: Dict[str, List[List[float]]] = {}
+    stop_flags: Dict[str, float] = {}
     action_results: List[ActionChunkResult] = []
     future_len = action_chunk_size - 1
-    max_start = transforms.shape[0] - (future_len + 1)
-    if max_start < 0:
-        return continuous_actions, action_results
+    num_frames = int(transforms.shape[0])
+    if num_frames < 1:
+        return continuous_actions, stop_flags, action_results
+    last_index = num_frames - 1
+    if stop_window is None:
+        stop_window = future_len
 
-    for step in range(0, max_start + 1, step_stride):
+    for step in range(0, num_frames, step_stride):
         ref_t = transforms[step]
         future_t = transforms[step + 1 : step + 1 + future_len]
-        future_steps = list(range(step + 1, step + 1 + future_len))
-        future_original_indices = [int(frame_indices[s]) for s in future_steps]
 
-        if len(future_t) > 0:
+        if future_t.shape[0] > 0:
             rel_xy, rel_yaw = relative_pose_batch(
                 ref_t[:3, :3],
                 ref_t[:3, 3],
                 future_t[:, :3, :3],
                 future_t[:, :3, 3],
             )
-            future_actions = np.column_stack([rel_xy, rel_yaw]).astype(float).tolist()
+            real_actions = np.column_stack([rel_xy, rel_yaw]).astype(float)
         else:
-            future_actions = []
+            real_actions = np.zeros((0, 3), dtype=float)
 
+        num_real = real_actions.shape[0]
+        if future_len > 0 and num_real < future_len:
+            if num_real > 0:
+                pad = np.repeat(real_actions[-1:], future_len - num_real, axis=0)
+            else:
+                pad = np.zeros((future_len - num_real, 3), dtype=float)
+            real_actions = np.concatenate([real_actions, pad], axis=0)
+
+        future_actions = real_actions.tolist()
         actions = [[0.0, 0.0, 0.0]] + future_actions
+        stop = 1.0 if (last_index - step) <= stop_window else 0.0
+
+        future_steps = [min(step + offset, last_index) for offset in range(1, future_len + 1)]
+        future_original_indices = [int(frame_indices[s]) for s in future_steps]
+
         continuous_actions[str(step)] = actions
+        stop_flags[str(step)] = stop
         action_results.append(
             ActionChunkResult(
                 step_index=step,
                 original_frame_idx=int(frame_indices[step]),
                 actions=actions,
                 future_original_indices=future_original_indices,
+                stop=stop,
             )
         )
 
-    return continuous_actions, action_results
+    return continuous_actions, stop_flags, action_results

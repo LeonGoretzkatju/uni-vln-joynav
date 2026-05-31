@@ -816,19 +816,24 @@ class Qwen35SupportTest(unittest.TestCase):
         transforms[2, :3, 3] = [1.0, 0.0, 0.0]  # Blender +X -> ROS -Y
         frame_indices = torch.tensor([0, 3, 6]).numpy()
 
-        actions, _ = build_continuous_actions(
+        actions, stop_flags, _ = build_continuous_actions(
             transforms=transforms,
             frame_indices=frame_indices,
             step_stride=1,
             action_chunk_size=3,
         )
 
-        self.assertEqual(sorted(actions), ["0"])
+        # Goal-approach region is now emitted (one chunk per frame), each padded
+        # to a fixed (future_len + 1) length.
+        self.assertEqual(sorted(actions), ["0", "1", "2"])
         self.assertEqual(actions["0"][0], [0.0, 0.0, 0.0])
         self.assertAlmostEqual(actions["0"][1][0], 1.0, places=6)
         self.assertAlmostEqual(actions["0"][1][1], 0.0, places=6)
         self.assertAlmostEqual(actions["0"][2][0], 0.0, places=6)
         self.assertAlmostEqual(actions["0"][2][1], -1.0, places=6)
+        # Final chunk is a stop chunk and is padded to the full horizon.
+        self.assertEqual(stop_flags["2"], 1.0)
+        self.assertEqual(len(actions["2"]), 3)
 
     def test_trajectory_mse_wraps_yaw_at_pi_boundary(self):
         from joynav.model.qwen3_5_trajectory_heads import trajectory_mse_loss
@@ -941,6 +946,110 @@ class Qwen35SupportTest(unittest.TestCase):
 
         self.assertEqual(target.shape, (6, 8, 3))
         self.assertTrue(torch.isfinite(loss))
+
+    def test_vlnn1_stop_flags_mark_goal_region_and_pad(self):
+        from joynav.dataset.vlnn1_annotation_utils import build_continuous_actions
+
+        num_frames = 12
+        transforms = np.tile(np.eye(4), (num_frames, 1, 1))
+        for i in range(num_frames):
+            transforms[i, :3, 3] = [0.0, float(i), 0.0]  # Blender +Y -> ROS +X (forward)
+        frame_indices = np.arange(num_frames)
+
+        actions, stop_flags, results = build_continuous_actions(
+            transforms=transforms,
+            frame_indices=frame_indices,
+            step_stride=1,
+            action_chunk_size=5,  # future_len = 4
+        )
+
+        # Full episode is emitted, each chunk padded to a fixed (future_len + 1, 3).
+        self.assertEqual(len(actions), num_frames)
+        self.assertTrue(all(np.asarray(chunk).shape == (5, 3) for chunk in actions.values()))
+        # stop_window defaults to future_len (=4): final 5 steps (7..11) are stop chunks.
+        self.assertEqual(stop_flags["0"], 0.0)
+        self.assertEqual(stop_flags["6"], 0.0)
+        self.assertEqual(stop_flags["7"], 1.0)
+        self.assertEqual(stop_flags["11"], 1.0)
+        self.assertEqual(sum(int(value) for value in stop_flags.values()), 5)
+        # Goal chunk's future motion is padded to ~zero ("arrived / stay-put").
+        self.assertTrue(np.allclose(np.asarray(actions["11"])[1:], 0.0))
+        self.assertEqual(results[-1].stop, 1.0)
+
+    def test_continuous_dataset_stop_target_helpers(self):
+        from joynav.dataset.continuous_vlnn1_action_dataset import ContinuousVLNN1ActionDataset
+
+        # Annotation stop_flags are read aligned to the requested steps.
+        item = {"stop_flags": {"0": 0.0, "3": 1.0, "6": 1.0}}
+        flags = ContinuousVLNN1ActionDataset._get_stop_flags(None, item, [0, 3, 6])
+        self.assertTrue(np.array_equal(flags, np.array([0.0, 1.0, 1.0], dtype=np.float32)))
+        # Pre-stop-schema annotations fall back to geometry derivation.
+        self.assertIsNone(ContinuousVLNN1ActionDataset._get_stop_flags(None, {}, [0]))
+
+        stay = torch.zeros(8, 3)
+        moving = torch.zeros(8, 3)
+        moving[:, 0] = torch.linspace(0.25, 2.0, 8)
+        self.assertEqual(ContinuousVLNN1ActionDataset._derive_stop_targets(stay).tolist(), [1.0])
+        self.assertEqual(ContinuousVLNN1ActionDataset._derive_stop_targets(moving).tolist(), [0.0])
+        chunked = torch.stack([stay, moving], dim=0)  # [2, 8, 3]
+        self.assertEqual(ContinuousVLNN1ActionDataset._derive_stop_targets(chunked).tolist(), [1.0, 0.0])
+
+    def test_trajectory_stop_head_loss_is_finite_and_weighted(self):
+        from joynav.model.qwen3_5_trajectory_heads import Qwen35OmegaTrajectoryMixin
+
+        mixin = Qwen35OmegaTrajectoryMixin()
+        mixin.config = SimpleNamespace(stop_pos_weight=1.0, stop_head_loss_weight=2.0)
+        mixin._build_stop_head(4)
+
+        # Negative bias keeps the initial stop probability low (no stop at step 0).
+        self.assertLess(torch.sigmoid(mixin.stop_head.bias).item(), 0.5)
+
+        features = torch.randn(3, 4)
+        targets = torch.tensor([1.0, 0.0, 1.0])
+        stop_loss = mixin._compute_stop_loss(features, targets)
+        self.assertTrue(torch.isfinite(stop_loss))
+        self.assertEqual(stop_loss.dim(), 0)
+
+        outputs = SimpleNamespace(loss=torch.tensor(1.0))
+        mixin._apply_stop_loss(outputs, features, targets)
+        self.assertGreater(float(outputs.loss), 1.0)  # weighted stop loss added
+        self.assertIsNotNone(outputs.stop_loss)
+
+        # Without stop_targets the loss is untouched and stop_loss is None.
+        passthrough = SimpleNamespace(loss=torch.tensor(1.0))
+        mixin._apply_stop_loss(passthrough, features, None)
+        self.assertEqual(float(passthrough.loss), 1.0)
+        self.assertIsNone(passthrough.stop_loss)
+
+    def test_trajectory_heads_wire_stop_head(self):
+        from joynav.model.qwen3_5_trajectory_heads import (
+            JoyNav_Qwen3_5OmegaDiTForCausalLM,
+            JoyNav_Qwen3_5OmegaMLPForCausalLM,
+            JoyNav_Qwen3_5OmegaNextDiTForCausalLM,
+        )
+
+        for cls in (
+            JoyNav_Qwen3_5OmegaMLPForCausalLM,
+            JoyNav_Qwen3_5OmegaDiTForCausalLM,
+            JoyNav_Qwen3_5OmegaNextDiTForCausalLM,
+        ):
+            init_src = inspect.getsource(cls.__init__)
+            forward_src = inspect.getsource(cls.forward)
+            predict_src = inspect.getsource(cls.predict_action)
+            self.assertIn("self._build_stop_head(hidden_size)", init_src)
+            self.assertIn("stop_targets=None", forward_src)
+            self.assertIn("self._apply_stop_loss(outputs, selected_features, stop_targets)", forward_src)
+            self.assertIn("outputs.stop_logit = self._predict_stop_logit(", predict_src)
+
+    def test_trajectory_evaluator_stop_and_receding_horizon_contract(self):
+        text = Path("joynav/eval/qwen3_5_omega_trajectory_head_evaluator.py").read_text()
+
+        self.assertIn("stop_threshold: float = field(default=0.5", text)
+        self.assertIn("replan_every: int = field(default=2", text)
+        self.assertIn("def _should_stop(self, outputs)", text)
+        self.assertIn("torch.sigmoid(stop_logit[0]).item()", text)
+        self.assertIn("if self._should_stop(outputs):", text)
+        self.assertIn("replan_every = max(int(self.args.replan_every), 1)", text)
 
     def test_action_latent_can_initialize_on_meta_device(self):
         from joynav.model.action_latent.modeling_action_latent import ActionLatent, ActionLatent_Config

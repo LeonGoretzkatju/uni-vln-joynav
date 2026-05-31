@@ -59,6 +59,8 @@ torchrun --nproc_per_node="$NPROC_PER_NODE" \
     --action_chunk_num "$ACTION_CHUNK_NUM" \
     --trajectory_horizon "$ACTION_CHUNK_NUM" \
     --trajectory_dim 3 \
+    --stop_threshold "${STOP_THRESHOLD:-0.5}" \
+    --replan_every "${REPLAN_EVERY:-2}" \
     --limit "$LIMIT" \
     --omega_mode "$OMEGA_MODE" \
     --spatial_forcing_image_resolution "$SPATIAL_FORCING_IMAGE_RESOLUTION" \

@@ -62,6 +62,8 @@ args="
     --action_dim 3 \
     --trajectory_horizon ${action_chunk_size} \
     --trajectory_dim 3 \
+    --stop_head_loss_weight ${STOP_HEAD_LOSS_WEIGHT:-1.0} \
+    --stop_pos_weight ${STOP_POS_WEIGHT:-1.0} \
     --trajectory_stride ${trajectory_stride} \
     --data_flatten False \
     --tune_mm_vision False \
