@@ -11,6 +11,7 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -151,6 +152,55 @@ def load_episode_data(file_path: str, trajectory_stride: int) -> EpisodeData:
 
     frame_indices = np.arange(len(transforms), dtype=np.int64)[::trajectory_stride]
     return EpisodeData(transforms=transforms[frame_indices], frame_indices=frame_indices)
+
+
+def _wrap_angle(angle: float) -> float:
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def discrete_actions_to_ego_trajectory(
+    actions: List[int],
+    start: int,
+    horizon: int,
+    forward_step: float = 0.25,
+    turn_angle_deg: float = 15.0,
+) -> Tuple[np.ndarray, float]:
+    """Integrate discrete VLN actions into an ego-centric future trajectory.
+
+    Used to convert Habitat R2R/RxR discrete demonstrations into the **same**
+    ``[x_forward, y_left, yaw]`` (ROS-style, yaw CCW-positive) ``horizon``-step
+    target as the InternData-N1 continuous trajectories, so both can co-train the
+    same heads.
+
+    Action ids follow the Habitat/StreamVLN convention used elsewhere in this
+    repo: ``0=STOP``, ``1=MOVE_FORWARD`` (by ``forward_step`` metres),
+    ``2=TURN_LEFT`` (``+turn_angle``), ``3=TURN_RIGHT`` (``-turn_angle``); any
+    other value (e.g. the leading ``-1``) is a no-op. Past the end of ``actions``
+    the agent is assumed stopped (no further motion).
+
+    Returns ``(waypoints[horizon, 3] float32, stop)`` where ``stop`` is ``1.0``
+    when a STOP action falls within the horizon window (the goal is reached within
+    the predicted horizon), matching the VLNN1 stop-flag semantics.
+    """
+    turn = math.radians(float(turn_angle_deg))
+    x = y = theta = 0.0
+    stop = 0.0
+    waypoints: List[List[float]] = []
+    num_actions = len(actions)
+    for offset in range(int(horizon)):
+        idx = start + offset
+        action = actions[idx] if idx < num_actions else 0
+        if action == 0:
+            stop = 1.0
+        elif action == 1:
+            x += forward_step * math.cos(theta)
+            y += forward_step * math.sin(theta)
+        elif action == 2:
+            theta = _wrap_angle(theta + turn)
+        elif action == 3:
+            theta = _wrap_angle(theta - turn)
+        waypoints.append([x, y, _wrap_angle(theta)])
+    return np.asarray(waypoints, dtype=np.float32), stop
 
 
 def blender_to_ros_coordinates(xyz_blender: np.ndarray) -> np.ndarray:

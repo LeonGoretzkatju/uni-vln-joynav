@@ -17,6 +17,7 @@ from .lazy_supervised_dataset import (
 from .vln_action_omega_spatial_forcing_dataset import (
     load_qwen_images_for_omega_direct,
 )
+from .vlnn1_annotation_utils import discrete_actions_to_ego_trajectory
 from vggt_omega.utils.load_fn import load_and_preprocess_images
 
 
@@ -343,6 +344,155 @@ class ContinuousVLNN1ActionInterleavedOmegaSpatialForcingDataset(
     pass
 
 
+class ContinuousActionMixedDataset(ContinuousVLNN1ActionDataset):
+    """Co-train InternData-N1 (precomputed continuous) and Habitat R2R/RxR
+    (discrete demos converted on the fly) in one dataset.
+
+    Each ``video_folder`` entry is auto-detected: items carrying
+    ``continuous_actions`` are VLNN1-style (handled by the parent), items carrying
+    discrete ``actions`` are R2R/RxR-style and are converted to the identical
+    ``[horizon, 3]`` ego trajectory + per-chunk stop flag via
+    ``discrete_actions_to_ego_trajectory``. The on-disk frame layout differs
+    (R2R/RxR use ``<video>/rgb/NNN.jpg``), so frame resolution is dispatched too.
+    """
+
+    def __init__(self, processor, data_args):
+        self.r2r_forward_step = float(getattr(data_args, "r2r_forward_step", 0.25))
+        self.r2r_turn_angle = float(getattr(data_args, "r2r_turn_angle", 15.0))
+        self.r2r_step_stride = max(int(getattr(data_args, "r2r_step_stride", 4)), 1)
+        super().__init__(processor, data_args)
+
+    @staticmethod
+    def _detect_source(annotations: List[Dict]) -> str:
+        first = annotations[0] if annotations else {}
+        if "continuous_actions" in first:
+            return "vlnn1"
+        if "actions" in first:
+            return "r2r"
+        return "vlnn1"
+
+    def load_data(self):
+        self.nav_data = []
+        for raw in self.data_args.video_folder.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            parts = raw.split("%")
+            video_folder = parts[0]
+            ratio = int(parts[1]) if len(parts) > 1 else 100
+            annotations_path = os.path.join(video_folder, self.data_args.annotations_file)
+            if not os.path.exists(annotations_path):
+                rank0_print(f"Warning: {annotations_path} not found, skipping")
+                continue
+            with open(annotations_path, "r", encoding="utf-8") as file:
+                annotations = json.load(file)
+            if ratio < 100 and annotations:
+                annotations = random.sample(annotations, max(int(len(annotations) * ratio / 100), 1))
+            source = self._detect_source(annotations)
+            for item in annotations:
+                item["_source"] = source
+                if source == "vlnn1":
+                    item["video_folder"] = video_folder
+                else:
+                    item["video"] = os.path.join(video_folder, item["video"])
+                    item["_actions"] = list(item.get("actions") or [])[1:] + [0]
+            rank0_print(f"Loaded {len(annotations)} {source} episodes from {video_folder}")
+            self.nav_data.extend(annotations)
+
+        list_data_dict = []
+        expected_shape = (self.action_chunk_size + 1, self.action_dim)
+        skipped = 0
+        for ep_id, item in enumerate(self.nav_data):
+            instructions = item.get("instructions") or ["Navigate to the goal."]
+            if not isinstance(instructions, list):
+                instructions = [instructions]
+            num_instructions = max(len(instructions), 1)
+
+            if item["_source"] == "vlnn1":
+                continuous_actions = item.get("continuous_actions") or {}
+                if not item.get("path") or not continuous_actions:
+                    skipped += 1
+                    continue
+                for step_str, actions in continuous_actions.items():
+                    try:
+                        step = int(step_str)
+                    except ValueError:
+                        continue
+                    if np.asarray(actions).shape != expected_shape:
+                        continue
+                    for ins_id in range(num_instructions):
+                        list_data_dict.append((ep_id, ins_id, step))
+            else:
+                actions = item["_actions"]
+                if len(actions) < 2:
+                    skipped += 1
+                    continue
+                for step in range(0, len(actions), self.r2r_step_stride):
+                    for ins_id in range(num_instructions):
+                        list_data_dict.append((ep_id, ins_id, step))
+
+        rank0_print(
+            f"ContinuousActionMixedDataset: {len(list_data_dict)} samples from "
+            f"{len(self.nav_data)} episodes (skipped {skipped})."
+        )
+        random.shuffle(list_data_dict)
+        self.list_data_dict = list_data_dict
+
+    def _r2r_frame_file(self, item: Dict, frame_idx: int) -> str:
+        frame_map = item.get("_frame_map")
+        if frame_map is None:
+            rgb_dir = os.path.join(item["video"], "rgb")
+            names = sorted(os.listdir(rgb_dir))
+            frame_map = {int(name.split(".")[0]) - 1: name for name in names}
+            item["_frame_map"] = frame_map
+        if frame_idx not in frame_map:
+            available = sorted(frame_map)
+            below = [key for key in available if key <= frame_idx]
+            frame_idx = below[-1] if below else available[0]
+        return os.path.join(item["video"], "rgb", frame_map[frame_idx])
+
+    def _prepare_r2r_sources(self, item: Dict, ins_id: int, step: int):
+        instructions = self._get_instructions(item)
+        continuous_actions, stop = discrete_actions_to_ego_trajectory(
+            item["_actions"],
+            start=step,
+            horizon=self.action_chunk_size,
+            forward_step=self.r2r_forward_step,
+            turn_angle_deg=self.r2r_turn_angle,
+        )
+        history_frames = [
+            self._r2r_frame_file(item, idx) for idx in self._sample_history_step_indices(step)
+        ]
+        if not history_frames:
+            history_frames = [self._r2r_frame_file(item, step)]
+
+        conversations = copy.deepcopy(self.conversations)
+        history_str = (DEFAULT_IMAGE_TOKEN + "\n") * len(history_frames)
+        conversations[0]["value"] += f" These are your historical observations:\n{history_str}"
+        conversations[0]["value"] = conversations[0]["value"].replace("<instruction>", instructions[ins_id])
+
+        return {
+            "image": history_frames,
+            "conversations": conversations,
+            "continuous_actions": continuous_actions,
+            "stop_targets": np.asarray([stop], dtype=np.float32),
+        }
+
+    def prepare_sources(self, i):
+        ep_id, ins_id, step = self.list_data_dict[i]
+        item = self.nav_data[ep_id]
+        if item.get("_source") == "r2r":
+            return self._prepare_r2r_sources(item, ins_id, step)
+        return super().prepare_sources(i)
+
+
+class ContinuousActionMixedOmegaSpatialForcingDataset(
+    ContinuousVLNN1ActionOmegaSpatialForcingMixin,
+    ContinuousActionMixedDataset,
+):
+    pass
+
+
 class ContinuousVLNN1ActionCollator(DataCollatorForSupervisedDataset):
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         continuous_actions = [instance.pop("continuous_actions") for instance in instances]
@@ -385,3 +535,5 @@ ContinuousVLNN1ActionDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator
 ContinuousVLNN1ActionOmegaSpatialForcingDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator
 ContinuousVLNN1ActionInterleavedDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator
 ContinuousVLNN1ActionInterleavedOmegaSpatialForcingDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator
+ContinuousActionMixedDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator
+ContinuousActionMixedOmegaSpatialForcingDataset.COLLATOR_CLASS = ContinuousVLNN1ActionCollator

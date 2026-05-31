@@ -24,6 +24,11 @@ class ContinuousVLNN1ActionDatasetArguments(LazySupervisedDatasetArguments):
     action_token: str = field(default="<|action|>")
     interleaved_num_chunks: int = field(default=4)
 
+    # R2R/RxR discrete -> continuous co-training (ContinuousActionMixedDataset).
+    r2r_forward_step: float = field(default=0.25, metadata={"help": "MOVE_FORWARD distance (m) for discrete->continuous conversion."})
+    r2r_turn_angle: float = field(default=15.0, metadata={"help": "TURN angle (deg) for discrete->continuous conversion."})
+    r2r_step_stride: int = field(default=4, metadata={"help": "Start-step stride when sampling R2R/RxR training windows."})
+
     spatial_forcing_teacher_patch_size: int = field(default=16)
     spatial_forcing_image_resolution: int = field(default=256)
 

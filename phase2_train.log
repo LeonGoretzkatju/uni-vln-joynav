@@ -1,0 +1,152 @@
+W0531 06:48:53.861000 20861 site-packages/torch/distributed/run.py:793] 
+W0531 06:48:53.861000 20861 site-packages/torch/distributed/run.py:793] *****************************************
+W0531 06:48:53.861000 20861 site-packages/torch/distributed/run.py:793] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0531 06:48:53.861000 20861 site-packages/torch/distributed/run.py:793] *****************************************
+[transformers] warmup_ratio is deprecated and will be removed in v5.2. Use `warmup_steps` instead.
+[transformers] warmup_ratio is deprecated and will be removed in v5.2. Use `warmup_steps` instead.
+[W531 06:49:00.581189885 CUDAAllocatorConfig.h:28] Warning: expandable_segments not supported on this platform (function operator())
+[W531 06:49:00.583545360 CUDAAllocatorConfig.h:28] Warning: expandable_segments not supported on this platform (function operator())
+NCCL version 2.21.5+cuda12.4
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+[transformers] The fast path is not available because one of the required library is not installed. Falling back to torch implementation. To install follow https://github.com/fla-org/flash-linear-attention#installation and https://github.com/Dao-AILab/causal-conv1d
+Loading weights:   0%|          | 0/473 [00:00<?, ?it/s]Loading weights:   0%|          | 0/473 [00:00<?, ?it/s]Loading weights:   0%|          | 1/473 [00:01<09:12,  1.17s/it]Loading weights:   0%|          | 1/473 [00:01<09:14,  1.17s/it]Loading weights: 100%|██████████| 473/473 [00:01<00:00, 393.85it/s]
+Loading weights: 100%|██████████| 473/473 [00:01<00:00, 392.49it/s]
+[transformers] [1mJoyNav_Qwen3_5OmegaMLPForCausalLM LOAD REPORT[0m from: /mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B
+Key                                  | Status  | 
+-------------------------------------+---------+-
+action_head.net.{0, 2, 4}.weight     | MISSING | 
+action_head.net.{0, 2, 4}.bias       | MISSING | 
+stop_head.weight                     | MISSING | 
+spatial_forcing_projector.fc2.weight | MISSING | 
+spatial_forcing_projector.fc1.weight | MISSING | 
+stop_head.bias                       | MISSING | 
+spatial_forcing_projector.fc2.bias   | MISSING | 
+spatial_forcing_projector.fc1.bias   | MISSING | 
+
+Notes:
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+[transformers] [1mJoyNav_Qwen3_5OmegaMLPForCausalLM LOAD REPORT[0m from: /mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B
+Key                                  | Status  | 
+-------------------------------------+---------+-
+action_head.net.{0, 2, 4}.weight     | MISSING | 
+action_head.net.{0, 2, 4}.bias       | MISSING | 
+spatial_forcing_projector.fc1.bias   | MISSING | 
+stop_head.bias                       | MISSING | 
+spatial_forcing_projector.fc1.weight | MISSING | 
+spatial_forcing_projector.fc2.weight | MISSING | 
+stop_head.weight                     | MISSING | 
+spatial_forcing_projector.fc2.bias   | MISSING | 
+
+Notes:
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+the initlized model is /mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B the class is JoyNav_Qwen3_5OmegaMLPForCausalLM
+[transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+the initlized model is /mnt/nas5/xiangchen/vlm_base/Qwen3.5-0.8B the class is JoyNav_Qwen3_5OmegaMLPForCausalLM
+[transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+Rank 0:  === BEFORE IMAGE PROCESSOR PARAMETERS ===
+Rank 0:  Image min_pixels: N/A
+Rank 0:  Image max_pixels: N/A
+Rank 0:  ip.size: SizeDict(height=None, width=None, longest_edge=16777216, shortest_edge=65536, max_height=None, max_width=None)
+Rank 0:  Image size (shortest_edge): 65536
+Rank 0:  Image size (longest_edge):  16777216
+Rank 0:  ✅ Updated image_processor size['shortest_edge'] to 12544
+Rank 0:  ✅ Updated image_processor size['longest_edge'] to 258048
+Rank 0:  === AFTER IMAGE PROCESSOR PARAMETERS ===
+Rank 0:  Image min_pixels: N/A
+Rank 0:  Image max_pixels: N/A
+Rank 0:  Image size (shortest_edge): 12544
+Rank 0:  Image size (longest_edge):  258048
+Rank 0:  
+=== BEFORE VIDEO PROCESSOR PARAMETERS ===
+Rank 0:  Video min_pixels: N/A
+Rank 0:  Video max_pixels: N/A
+Rank 0:  Video min_frames: 4
+Rank 0:  Video max_frames: 768
+Rank 0:  Video fps: 2
+Rank 0:  Video size (shortest_edge): 4096
+Rank 0:  Video size (longest_edge):  25165824
+Rank 0:  ✅ Updated video_processor min_frames to 4
+Rank 0:  ✅ Updated video_processor max_frames to 8
+Rank 0:  ✅ Updated video_processor fps to 2.0
+Rank 0:  ✅ Updated Video size (shortest_edge): 200704
+Rank 0:  ✅ Updated Video size (longest_edge):  802816
+Rank 0:  === AFTER VIDEO PROCESSOR PARAMETERS ===
+Rank 0:  Video min_pixels: N/A
+Rank 0:  Video max_pixels: N/A
+Rank 0:  Video min_frames: 4
+Rank 0:  Video max_frames: 8
+Rank 0:  Video fps: 2.0
+Rank 0:  Video size (shortest_edge): 200704
+Rank 0:  Video size (longest_edge):  802816
+Rank 0:  Loaded 52 vlnn1 episodes from /mnt/nas5/xiangchen/VLNData/InternData-N1/vln_n1/traj_data
+Rank 0:  Loaded 10819 r2r episodes from /mnt/nas5/xiangchen/VLNData/R2R
+Rank 0:  Loaded 19990 r2r episodes from /mnt/nas5/xiangchen/VLNData/RxR
+Rank 0:  ContinuousActionMixedDataset: 650203 samples from 30861 episodes (skipped 45).
+Rank 0:  ContinuousVLNN1ActionDataset: samples=650203, horizon=8, action_dim=3
+trainable params: 12,588,544 || all params: 100,592,896 || trainable%: 12.5143
+trainable params: 764,981,568 || all params: 852,985,920 || trainable%: 89.6828
+[transformers] The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 248046, 'pad_token_id': 248044}.
+[transformers] The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 248046, 'pad_token_id': 248044}.
+  0%|          | 0/50 [00:00<?, ?it/s]/mnt/nas5/xiangchen/vlacode/JD-VLN/joynav/model/geometry_encoder/vggt_omega_encoder.py:101: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(model_path, map_location="cpu")
+/mnt/nas5/xiangchen/vlacode/JD-VLN/joynav/model/geometry_encoder/vggt_omega_encoder.py:101: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(model_path, map_location="cpu")
+  2%|▏         | 1/50 [01:30<1:13:35, 90.11s/it]                                                {'loss': '1.88', 'grad_norm': '519', 'learning_rate': '0', 'epoch': '3.076e-06'}
+  2%|▏         | 1/50 [01:30<1:13:35, 90.11s/it]  4%|▍         | 2/50 [01:40<34:25, 43.03s/it]                                                {'loss': '0.8778', 'grad_norm': '121.7', 'learning_rate': '1e-05', 'epoch': '6.152e-06'}
+  4%|▍         | 2/50 [01:40<34:25, 43.03s/it]  6%|▌         | 3/50 [01:50<21:53, 27.94s/it]                                              {'loss': '2.331', 'grad_norm': '990.8', 'learning_rate': '2e-05', 'epoch': '9.228e-06'}
+  6%|▌         | 3/50 [01:50<21:53, 27.94s/it]  8%|▊         | 4/50 [02:00<16:08, 21.05s/it]                                              {'loss': '0.4158', 'grad_norm': '44.52', 'learning_rate': '1.998e-05', 'epoch': '1.23e-05'}
+  8%|▊         | 4/50 [02:00<16:08, 21.05s/it] 10%|█         | 5/50 [02:11<12:53, 17.20s/it]                                              {'loss': '0.3984', 'grad_norm': '25.37', 'learning_rate': '1.991e-05', 'epoch': '1.538e-05'}
+ 10%|█         | 5/50 [02:11<12:53, 17.20s/it] 12%|█▏        | 6/50 [02:20<10:48, 14.73s/it]                                              {'loss': '0.3019', 'grad_norm': '18.1', 'learning_rate': '1.981e-05', 'epoch': '1.846e-05'}
+ 12%|█▏        | 6/50 [02:20<10:48, 14.73s/it] 14%|█▍        | 7/50 [02:30<09:26, 13.17s/it]                                              {'loss': '0.1454', 'grad_norm': '11.21', 'learning_rate': '1.966e-05', 'epoch': '2.153e-05'}
+ 14%|█▍        | 7/50 [02:30<09:26, 13.17s/it] 16%|█▌        | 8/50 [02:41<08:32, 12.20s/it]                                              {'loss': '0.2047', 'grad_norm': '17.27', 'learning_rate': '1.947e-05', 'epoch': '2.461e-05'}
+ 16%|█▌        | 8/50 [02:41<08:32, 12.20s/it] 18%|█▊        | 9/50 [02:51<07:54, 11.58s/it]                                              {'loss': '0.2219', 'grad_norm': '12.34', 'learning_rate': '1.924e-05', 'epoch': '2.768e-05'}
+ 18%|█▊        | 9/50 [02:51<07:54, 11.58s/it] 20%|██        | 10/50 [03:01<07:22, 11.05s/it]                                               {'loss': '0.2229', 'grad_norm': '13.86', 'learning_rate': '1.897e-05', 'epoch': '3.076e-05'}
+ 20%|██        | 10/50 [03:01<07:22, 11.05s/it] 22%|██▏       | 11/50 [03:11<07:00, 10.78s/it]                                               {'loss': '0.1443', 'grad_norm': '8.999', 'learning_rate': '1.866e-05', 'epoch': '3.384e-05'}
+ 22%|██▏       | 11/50 [03:11<07:00, 10.78s/it] 24%|██▍       | 12/50 [03:21<06:43, 10.61s/it]                                               {'loss': '11.53', 'grad_norm': '311.2', 'learning_rate': '1.831e-05', 'epoch': '3.691e-05'}
+ 24%|██▍       | 12/50 [03:21<06:43, 10.61s/it] 26%|██▌       | 13/50 [03:31<06:25, 10.41s/it]                                               {'loss': '0.1623', 'grad_norm': '6.811', 'learning_rate': '1.793e-05', 'epoch': '3.999e-05'}
+ 26%|██▌       | 13/50 [03:31<06:25, 10.41s/it] 28%|██▊       | 14/50 [03:41<06:09, 10.26s/it]                                               {'loss': '0.3061', 'grad_norm': '23.45', 'learning_rate': '1.752e-05', 'epoch': '4.306e-05'}
+ 28%|██▊       | 14/50 [03:41<06:09, 10.26s/it] 30%|███       | 15/50 [03:51<06:01, 10.32s/it]                                               {'loss': '0.4258', 'grad_norm': '21.57', 'learning_rate': '1.707e-05', 'epoch': '4.614e-05'}
+ 30%|███       | 15/50 [03:51<06:01, 10.32s/it] 32%|███▏      | 16/50 [04:01<05:47, 10.23s/it]                                               {'loss': '1.847', 'grad_norm': '172.5', 'learning_rate': '1.659e-05', 'epoch': '4.922e-05'}
+ 32%|███▏      | 16/50 [04:01<05:47, 10.23s/it] 34%|███▍      | 17/50 [04:11<05:35, 10.16s/it]                                               {'loss': '2.594', 'grad_norm': '312.8', 'learning_rate': '1.609e-05', 'epoch': '5.229e-05'}
+ 34%|███▍      | 17/50 [04:11<05:35, 10.16s/it] 36%|███▌      | 18/50 [04:22<05:27, 10.22s/it]                                               {'loss': '0.483', 'grad_norm': '36.25', 'learning_rate': '1.556e-05', 'epoch': '5.537e-05'}
+ 36%|███▌      | 18/50 [04:22<05:27, 10.22s/it] 38%|███▊      | 19/50 [04:32<05:18, 10.28s/it]                                               {'loss': '0.1975', 'grad_norm': '7.906', 'learning_rate': '1.5e-05', 'epoch': '5.844e-05'}
+ 38%|███▊      | 19/50 [04:32<05:18, 10.28s/it] 40%|████      | 20/50 [04:42<05:07, 10.26s/it]                                               {'loss': '0.1931', 'grad_norm': '5.024', 'learning_rate': '1.442e-05', 'epoch': '6.152e-05'}
+ 40%|████      | 20/50 [04:42<05:07, 10.26s/it] 42%|████▏     | 21/50 [04:52<04:55, 10.19s/it]                                               {'loss': '3.434', 'grad_norm': '131.7', 'learning_rate': '1.383e-05', 'epoch': '6.46e-05'}
+ 42%|████▏     | 21/50 [04:52<04:55, 10.19s/it] 44%|████▍     | 22/50 [05:02<04:44, 10.15s/it]                                               {'loss': '0.2582', 'grad_norm': '6.387', 'learning_rate': '1.321e-05', 'epoch': '6.767e-05'}
+ 44%|████▍     | 22/50 [05:02<04:44, 10.15s/it] 46%|████▌     | 23/50 [05:12<04:32, 10.11s/it]                                               {'loss': '0.1666', 'grad_norm': '5.529', 'learning_rate': '1.259e-05', 'epoch': '7.075e-05'}
+ 46%|████▌     | 23/50 [05:12<04:32, 10.11s/it] 48%|████▊     | 24/50 [05:22<04:21, 10.06s/it]                                               {'loss': '0.1745', 'grad_norm': '4.416', 'learning_rate': '1.195e-05', 'epoch': '7.382e-05'}
+ 48%|████▊     | 24/50 [05:22<04:21, 10.06s/it] 50%|█████     | 25/50 [05:33<04:15, 10.21s/it]                                               {'loss': '0.2045', 'grad_norm': '6.984', 'learning_rate': '1.131e-05', 'epoch': '7.69e-05'}
+ 50%|█████     | 25/50 [05:33<04:15, 10.21s/it] 52%|█████▏    | 26/50 [05:43<04:03, 10.16s/it]                                               {'loss': '0.1689', 'grad_norm': '6.754', 'learning_rate': '1.065e-05', 'epoch': '7.997e-05'}
+ 52%|█████▏    | 26/50 [05:43<04:03, 10.16s/it] 54%|█████▍    | 27/50 [05:53<03:52, 10.11s/it]                                               {'loss': '0.1518', 'grad_norm': '5.829', 'learning_rate': '1e-05', 'epoch': '8.305e-05'}
+ 54%|█████▍    | 27/50 [05:53<03:52, 10.11s/it] 56%|█████▌    | 28/50 [06:03<03:41, 10.09s/it]                                               {'loss': '0.2091', 'grad_norm': '3.851', 'learning_rate': '9.346e-06', 'epoch': '8.613e-05'}
+ 56%|█████▌    | 28/50 [06:03<03:41, 10.09s/it] 58%|█████▊    | 29/50 [06:13<03:33, 10.15s/it]                                               {'loss': '0.1651', 'grad_norm': '4.615', 'learning_rate': '8.695e-06', 'epoch': '8.92e-05'}
+ 58%|█████▊    | 29/50 [06:13<03:33, 10.15s/it] 60%|██████    | 30/50 [06:23<03:20, 10.04s/it]                                               {'loss': '0.2409', 'grad_norm': '6.077', 'learning_rate': '8.049e-06', 'epoch': '9.228e-05'}
+ 60%|██████    | 30/50 [06:23<03:20, 10.04s/it] 62%|██████▏   | 31/50 [06:33<03:11, 10.09s/it]                                               {'loss': '0.1456', 'grad_norm': '4.222', 'learning_rate': '7.412e-06', 'epoch': '9.535e-05'}
+ 62%|██████▏   | 31/50 [06:33<03:11, 10.09s/it] 64%|██████▍   | 32/50 [06:43<03:01, 10.09s/it]                                               {'loss': '0.2133', 'grad_norm': '3.154', 'learning_rate': '6.786e-06', 'epoch': '9.843e-05'}
+ 64%|██████▍   | 32/50 [06:43<03:01, 10.09s/it] 66%|██████▌   | 33/50 [06:53<02:51, 10.06s/it]                                               {'loss': '0.213', 'grad_norm': '3.647', 'learning_rate': '6.173e-06', 'epoch': '0.0001015'}
+ 66%|██████▌   | 33/50 [06:53<02:51, 10.06s/it] 68%|██████▊   | 34/50 [07:03<02:40, 10.02s/it]                                               {'loss': '2.45', 'grad_norm': '111.8', 'learning_rate': '5.577e-06', 'epoch': '0.0001046'}
+ 68%|██████▊   | 34/50 [07:03<02:40, 10.02s/it] 70%|███████   | 35/50 [07:14<02:32, 10.14s/it]                                               {'loss': '0.1796', 'grad_norm': '6.528', 'learning_rate': '5e-06', 'epoch': '0.0001077'}
+ 70%|███████   | 35/50 [07:14<02:32, 10.14s/it] 72%|███████▏  | 36/50 [07:24<02:22, 10.21s/it]                                               {'loss': '0.5077', 'grad_norm': '9.061', 'learning_rate': '4.444e-06', 'epoch': '0.0001107'}
+ 72%|███████▏  | 36/50 [07:24<02:22, 10.21s/it] 74%|███████▍  | 37/50 [07:34<02:11, 10.12s/it]                                               {'loss': '0.4862', 'grad_norm': '8.851', 'learning_rate': '3.912e-06', 'epoch': '0.0001138'}
+ 74%|███████▍  | 37/50 [07:34<02:11, 10.12s/it] 76%|███████▌  | 38/50 [07:44<02:00, 10.04s/it]                                               {'loss': '0.1881', 'grad_norm': '8.646', 'learning_rate': '3.407e-06', 'epoch': '0.0001169'}
+ 76%|███████▌  | 38/50 [07:44<02:00, 10.04s/it] 78%|███████▊  | 39/50 [07:54<01:50, 10.05s/it]                                               {'loss': '0.4563', 'grad_norm': '9.996', 'learning_rate': '2.929e-06', 'epoch': '0.00012'}
+ 78%|███████▊  | 39/50 [07:54<01:50, 10.05s/it] 80%|████████  | 40/50 [08:04<01:41, 10.14s/it]                                               {'loss': '0.4193', 'grad_norm': '8.559', 'learning_rate': '2.482e-06', 'epoch': '0.000123'}
+ 80%|████████  | 40/50 [08:04<01:41, 10.14s/it] 82%|████████▏ | 41/50 [08:15<01:31, 10.18s/it]                                               {'loss': '0.1737', 'grad_norm': '10.11', 'learning_rate': '2.066e-06', 'epoch': '0.0001261'}
+ 82%|████████▏ | 41/50 [08:15<01:31, 10.18s/it] 84%|████████▍ | 42/50 [08:25<01:21, 10.15s/it]                                               {'loss': '0.1722', 'grad_norm': '10.03', 'learning_rate': '1.685e-06', 'epoch': '0.0001292'}
+ 84%|████████▍ | 42/50 [08:25<01:21, 10.15s/it] 86%|████████▌ | 43/50 [08:35<01:10, 10.07s/it]                                               {'loss': '1.795', 'grad_norm': '100.9', 'learning_rate': '1.34e-06', 'epoch': '0.0001323'}
+ 86%|████████▌ | 43/50 [08:35<01:10, 10.07s/it] 88%|████████▊ | 44/50 [08:44<01:00, 10.03s/it]                                               {'loss': '1.918', 'grad_norm': '100', 'learning_rate': '1.031e-06', 'epoch': '0.0001353'}
+ 88%|████████▊ | 44/50 [08:44<01:00, 10.03s/it] 90%|█████████ | 45/50 [08:55<00:50, 10.15s/it]                                               {'loss': '0.4016', 'grad_norm': '11.37', 'learning_rate': '7.612e-07', 'epoch': '0.0001384'}
+ 90%|█████████ | 45/50 [08:55<00:50, 10.15s/it] 92%|█████████▏| 46/50 [09:05<00:40, 10.11s/it]                                               {'loss': '1.592', 'grad_norm': '95.74', 'learning_rate': '5.307e-07', 'epoch': '0.0001415'}
+ 92%|█████████▏| 46/50 [09:05<00:40, 10.11s/it] 94%|█████████▍| 47/50 [09:15<00:30, 10.18s/it]                                               {'loss': '1.677', 'grad_norm': '98.44', 'learning_rate': '3.407e-07', 'epoch': '0.0001446'}
+ 94%|█████████▍| 47/50 [09:15<00:30, 10.18s/it] 96%|█████████▌| 48/50 [09:25<00:20, 10.09s/it]                                               {'loss': '0.2229', 'grad_norm': '14.71', 'learning_rate': '1.921e-07', 'epoch': '0.0001476'}
+ 96%|█████████▌| 48/50 [09:25<00:20, 10.09s/it] 98%|█████████▊| 49/50 [09:35<00:10, 10.09s/it]                                               {'loss': '0.2308', 'grad_norm': '15.55', 'learning_rate': '8.555e-08', 'epoch': '0.0001507'}
+ 98%|█████████▊| 49/50 [09:35<00:10, 10.09s/it]100%|██████████| 50/50 [09:45<00:00, 10.02s/it]                                               {'loss': '0.5323', 'grad_norm': '15.39', 'learning_rate': '2.141e-08', 'epoch': '0.0001538'}
+100%|██████████| 50/50 [09:45<00:00, 10.02s/it]
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s][A
+Writing model shards: 100%|██████████| 1/1 [00:04<00:00,  4.89s/it][AWriting model shards: 100%|██████████| 1/1 [00:04<00:00,  4.89s/it]
+                                               {'train_runtime': '616.9', 'train_samples_per_second': '0.162', 'train_steps_per_second': '0.081', 'train_loss': '0.8806', 'epoch': '0.0001538'}
+100%|██████████| 50/50 [10:16<00:00, 10.02s/it]100%|██████████| 50/50 [10:17<00:00, 12.35s/it]
+Saving model checkpoint with local_rank -1
+Saving model checkpoint with local_rank -1
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]Writing model shards: 100%|██████████| 1/1 [00:07<00:00,  7.62s/it]Writing model shards: 100%|██████████| 1/1 [00:07<00:00,  7.62s/it]
+[rank0]:[W531 06:59:34.613999372 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed before we destruct ProcessGroupNCCL. On normal program exit, the application should call destroy_process_group to ensure that any pending NCCL operations have finished in this process. In rare cases this process can exit before this point and block the progress of another member of the process group. This constraint has always been present,  but this warning has only been added since PyTorch 2.4 (function operator())

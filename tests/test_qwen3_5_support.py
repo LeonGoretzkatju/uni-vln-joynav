@@ -1051,6 +1051,57 @@ class Qwen35SupportTest(unittest.TestCase):
         self.assertIn("if self._should_stop(outputs):", text)
         self.assertIn("replan_every = max(int(self.args.replan_every), 1)", text)
 
+    def test_discrete_actions_to_ego_trajectory(self):
+        import math
+        from joynav.dataset.vlnn1_annotation_utils import discrete_actions_to_ego_trajectory
+
+        # forward, forward, turn-left, forward
+        wps, stop = discrete_actions_to_ego_trajectory(
+            [1, 1, 2, 1], start=0, horizon=4, forward_step=0.25, turn_angle_deg=15.0
+        )
+        self.assertEqual(wps.shape, (4, 3))
+        self.assertEqual(stop, 0.0)
+        self.assertAlmostEqual(float(wps[0][0]), 0.25, places=5)  # forward -> +x
+        self.assertAlmostEqual(float(wps[0][1]), 0.0, places=5)
+        self.assertAlmostEqual(float(wps[1][0]), 0.5, places=5)
+        self.assertAlmostEqual(float(wps[2][2]), math.radians(15), places=5)  # left -> +yaw
+
+        # turn-right -> negative yaw
+        wps_r, _ = discrete_actions_to_ego_trajectory([3], start=0, horizon=1)
+        self.assertAlmostEqual(float(wps_r[0][2]), -math.radians(15), places=5)
+
+        # STOP within horizon -> stop flag set, frozen pose afterwards
+        wps_s, stop_s = discrete_actions_to_ego_trajectory([1, 0], start=0, horizon=4)
+        self.assertEqual(stop_s, 1.0)
+        self.assertTrue(np.allclose(wps_s[1], wps_s[2]))
+        self.assertTrue(np.allclose(wps_s[2], wps_s[3]))
+
+        # past the end of the action list -> treated as stopped
+        _, stop_pad = discrete_actions_to_ego_trajectory([1], start=0, horizon=3)
+        self.assertEqual(stop_pad, 1.0)
+
+    def test_continuous_action_mixed_dataset_registered_and_detects_sources(self):
+        import joynav.dataset  # noqa: F401
+        from joynav.dataset.continuous_vlnn1_action_dataset import (
+            ContinuousActionMixedDataset,
+            ContinuousActionMixedOmegaSpatialForcingDataset,
+        )
+
+        self.assertEqual(
+            get_component("dataset", "continuous_action_mixed").__name__,
+            "ContinuousActionMixedDataset",
+        )
+        self.assertEqual(
+            get_component("dataset", "continuous_action_mixed_sf_omega").__name__,
+            "ContinuousActionMixedOmegaSpatialForcingDataset",
+        )
+        self.assertEqual(ContinuousActionMixedDataset._detect_source([{"continuous_actions": {}}]), "vlnn1")
+        self.assertEqual(ContinuousActionMixedDataset._detect_source([{"actions": [1, 2, 3]}]), "r2r")
+        self.assertEqual(
+            ContinuousActionMixedOmegaSpatialForcingDataset.COLLATOR_CLASS.__name__,
+            "ContinuousVLNN1ActionCollator",
+        )
+
     def test_action_latent_can_initialize_on_meta_device(self):
         from joynav.model.action_latent.modeling_action_latent import ActionLatent, ActionLatent_Config
 

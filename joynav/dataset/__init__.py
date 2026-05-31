@@ -9,6 +9,8 @@ from joynav.dataset.no_interleave_vln_action_dataset import VLNActionDataset as 
 from joynav.dataset.vln_action_spatial_forcing_dataset import VLNActionSpatialForcingDataset
 from joynav.dataset.vln_action_omega_spatial_forcing_dataset import VLNActionOmegaSpatialForcingDataset
 from joynav.dataset.continuous_vlnn1_action_dataset import (
+    ContinuousActionMixedDataset,
+    ContinuousActionMixedOmegaSpatialForcingDataset,
     ContinuousVLNN1ActionDataset,
     ContinuousVLNN1ActionInterleavedDataset,
     ContinuousVLNN1ActionInterleavedOmegaSpatialForcingDataset,
@@ -30,5 +32,7 @@ register_component('dataset', 'continuous_vlnn1_action_noninterleave', Continuou
 register_component('dataset', 'continuous_vlnn1_action_noninterleave_sf_omega', ContinuousVLNN1ActionOmegaSpatialForcingDataset)
 register_component('dataset', 'continuous_vlnn1_action_interleave', ContinuousVLNN1ActionInterleavedDataset)
 register_component('dataset', 'continuous_vlnn1_action_interleave_sf_omega', ContinuousVLNN1ActionInterleavedOmegaSpatialForcingDataset)
+register_component('dataset', 'continuous_action_mixed', ContinuousActionMixedDataset)
+register_component('dataset', 'continuous_action_mixed_sf_omega', ContinuousActionMixedOmegaSpatialForcingDataset)
 register_component('dataset', 'vln_discrete_action', VLNDiscreteActionDataset)
 register_component('dataset', 'vln_discrete_action_geo', VLNDiscreteActionGeoDataset)
