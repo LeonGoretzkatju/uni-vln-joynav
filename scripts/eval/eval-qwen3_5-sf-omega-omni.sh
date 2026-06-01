@@ -20,6 +20,11 @@ MODEL_TYPE=${MODEL_TYPE:-qwen3_5_omni_head_sf_omega}
 EVALUATOR_TYPE=${EVALUATOR_TYPE:-qwen3_5_omni_head_sf_omega}
 MODEL_PATH=${MODEL_PATH:-outputs/qwen3_5_0_8b_sf_omega_omni}
 OUTPUT_PATH=${OUTPUT_PATH:-results/r2r/val_unseen/qwen3_5_sf_omega_omni}
+# Default to the front-only config to MATCH the front-only training data (the generator
+# replicates the front frame into all three current slots), keeping the train/eval input
+# distribution aligned. To run OmniNav-style real left/front/right panorama eval, set
+# HABITAT_CONFIG_PATH=configs/omni_r2r.yaml — but ONLY for a checkpoint trained on real
+# 3-camera current views, otherwise the left/right slots are out-of-distribution.
 HABITAT_CONFIG_PATH=${HABITAT_CONFIG_PATH:-configs/vln_r2r.yaml}
 EVAL_SPLIT=${EVAL_SPLIT:-val_unseen}
 OMEGA_MODE=${OMEGA_MODE:-text_align_force_qwen}
@@ -63,6 +68,7 @@ torchrun --nproc_per_node="$NPROC_PER_NODE" \
     --omni_step_scale "${OMNI_STEP_SCALE:-0.3}" \
     --omni_norm_method "${OMNI_NORM_METHOD:-min_max_split_arrive}" \
     --omni_num_inference_timesteps "${OMNI_NUM_INFERENCE_TIMESTEPS:-10}" \
+    --omni_use_panorama "${OMNI_USE_PANORAMA:-True}" \
     --stop_threshold "${STOP_THRESHOLD:-0.5}" \
     --replan_every "${REPLAN_EVERY:-1}" \
     --limit "$LIMIT" \

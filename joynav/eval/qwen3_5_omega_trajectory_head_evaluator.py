@@ -22,6 +22,10 @@ from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import (
 from joynav.eval.qwen3_vl_lm_head_evaluator import PROMPT_MODE_TRAINING_INTERMEDIATE, build_messages
 from joynav.utils.dist import get_rank
 
+# Side-effect import: registers the rgb_left / rgb_right sim sensors used by
+# configs/omni_r2r.yaml so the Omni evaluator can read real left/right current views.
+import joynav.eval.omni_panorama_sensors  # noqa: F401,E402
+
 
 def normalize_angle(angle: float) -> float:
     return (angle + math.pi) % (2 * math.pi) - math.pi
@@ -149,6 +153,15 @@ class Qwen3_5OmegaOmniEvaluatorArguments(Qwen3_5OmegaTrajectoryEvaluatorArgument
     omni_query_action_layers: int = field(default=1)
     omni_use_arrive_list: bool = field(default=True)
     waypoint_stall_distance: float = field(default=0.05)
+    # When the Habitat config exposes left/right RGB sensors (configs/omni_r2r.yaml), fill the
+    # leftside/frontside/rightside prompt slots with the REAL current-step views, matching
+    # OmniNav's add_frame([left, right, front]). Falls back to replicating the front view when
+    # the env has only a single RGB sensor (configs/vln_r2r.yaml) -> keeps front-only checkpoints
+    # train/eval consistent. Set False to force front-replication even with a 3-camera config.
+    omni_use_panorama: bool = field(default=True)
+    omni_front_sensor_uuid: str = field(default="rgb")
+    omni_left_sensor_uuid: str = field(default="rgb_left")
+    omni_right_sensor_uuid: str = field(default="rgb_right")
 
 
 class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
@@ -382,6 +395,10 @@ class Qwen3_5OmegaOmniEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
         super().__init__(*args, **kwargs)
         self.action_chunk_num = int(getattr(self.args, "action_chunk_num", 5))
         self.omni_step_scale = float(getattr(self.args, "omni_step_scale", 0.3))
+        self.omni_use_panorama = bool(getattr(self.args, "omni_use_panorama", True))
+        self.front_uuid = str(getattr(self.args, "omni_front_sensor_uuid", "rgb"))
+        self.left_uuid = str(getattr(self.args, "omni_left_sensor_uuid", "rgb_left"))
+        self.right_uuid = str(getattr(self.args, "omni_right_sensor_uuid", "rgb_right"))
         self.conversation = [
             {
                 "from": "human",
@@ -408,16 +425,38 @@ class Qwen3_5OmegaOmniEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
             indices = np.linspace(0, latest - 1, num_history, dtype=np.int32).tolist()
         return [int(max(min(idx, latest), 0)) for idx in indices[:num_history]]
 
-    def prepare_omni_inputs(self, step_id, episode, rgb_list):
+    def _current_views(self, observations, front_img):
+        """Return (left, front, right) PIL images for the current step.
+
+        Mirrors OmniNav's ``add_frame([left, right, front])`` where the current
+        observation is a real 3-camera panorama. Falls back to replicating the
+        front view when the env exposes only a single RGB sensor
+        (``configs/vln_r2r.yaml``), keeping train/eval consistent for front-only
+        checkpoints.
+        """
+        if (
+            self.omni_use_panorama
+            and self.left_uuid in observations
+            and self.right_uuid in observations
+        ):
+            left_img = Image.fromarray(observations[self.left_uuid]).convert("RGB")
+            right_img = Image.fromarray(observations[self.right_uuid]).convert("RGB")
+            return left_img, front_img, right_img
+        return front_img, front_img, front_img
+
+    def prepare_omni_inputs(self, step_id, episode, rgb_list, current_views):
         history_id = self._history_indices(step_id, len(rgb_list))
-        current = rgb_list[-1]
+        left_img, front_img, right_img = current_views
         prompt = self.conversation[0]["value"].format(
             num_action_trunck=self.action_chunk_num,
             history_img_string="<image>" * len(history_id),
         )
         prompt = prompt.replace("<instruction>", episode.instruction.instruction_text)
         source = {
-            "image": [rgb_list[idx] for idx in history_id] + [current, current, current],
+            # History keeps front-only frames (matches OmniNav); the current slots map
+            # leftside/frontside/rightside -> [left, front, right] in prompt order so each
+            # <image> binds to the camera label that precedes it.
+            "image": [rgb_list[idx] for idx in history_id] + [left_img, front_img, right_img],
             "conversations": [
                 {"from": "human", "value": prompt},
                 {"from": "gpt", "value": ""},
@@ -511,14 +550,18 @@ class Qwen3_5OmegaOmniEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
                 action_seq = []
 
                 while not env.episode_over and step_id <= 500:
-                    image = Image.fromarray(observations["rgb"]).convert("RGB")
-                    rgb_list.append(image)
+                    # Front view drives the front-only history buffer (matches OmniNav); the
+                    # current step's left/front/right (real panorama when available) feed the
+                    # leftside/frontside/rightside prompt slots.
+                    front_img = Image.fromarray(observations[self.front_uuid]).convert("RGB")
+                    rgb_list.append(front_img)
+                    current_views = self._current_views(observations, front_img)
                     info = env.get_metrics()
                     if info["top_down_map"] is not None:
-                        vis_frames.append(observations_to_image({"rgb": np.asarray(image)}, info))
+                        vis_frames.append(observations_to_image({"rgb": np.asarray(front_img)}, info))
 
                     if len(action_seq) == 0:
-                        inputs = self.prepare_omni_inputs(step_id, episode, rgb_list)
+                        inputs = self.prepare_omni_inputs(step_id, episode, rgb_list, current_views)
                         with torch.no_grad():
                             outputs = self.model.predict_waypoints(**inputs)
                         if self._should_stop(outputs.arrive_pred):
@@ -526,8 +569,14 @@ class Qwen3_5OmegaOmniEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
                         else:
                             action_seq = self._waypoint_actions(outputs.wp_pred, outputs.sin_angle, outputs.cos_angle)
                         if os.environ.get("JOYNAV_OMNI_EVAL_DEBUG", "0") == "1":
+                            used_panorama = bool(
+                                self.omni_use_panorama
+                                and self.left_uuid in observations
+                                and self.right_uuid in observations
+                            )
                             print(
                                 f"episode_id-{episode.episode_id} step_id-{step_id} === "
+                                f"panorama={used_panorama} "
                                 f"wp_pred={outputs.wp_pred.detach().float().cpu().tolist()} "
                                 f"arrive={outputs.arrive_pred.detach().float().cpu().tolist()} action_seq={action_seq}"
                             )
