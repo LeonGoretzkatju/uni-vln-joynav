@@ -19,7 +19,7 @@ from joynav.eval.qwen3_5_lm_head_sf_omega_evaluator import (
     Qwen3_5OmegaSpatialForcingEvaluator,
     Qwen3_5OmegaSpatialForcingEvaluatorArguments,
 )
-from joynav.eval.qwen3_vl_lm_head_evaluator import PROMPT_MODE_TRAINING_INTERMEDIATE
+from joynav.eval.qwen3_vl_lm_head_evaluator import PROMPT_MODE_TRAINING_INTERMEDIATE, build_messages
 from joynav.utils.dist import get_rank
 
 
@@ -123,6 +123,32 @@ class Qwen3_5OmegaDiTTrajectoryEvaluatorArguments(Qwen3_5OmegaTrajectoryEvaluato
 class Qwen3_5OmegaNextDiTTrajectoryEvaluatorArguments(Qwen3_5OmegaTrajectoryEvaluatorArguments):
     evaluator_type: str = field(default="qwen3_5_nextdit_head_sf_omega")
     model_type: str = field(default="qwen3_5_nextdit_head_sf_omega")
+
+
+@dataclass
+class Qwen3_5OmegaOmniEvaluatorArguments(Qwen3_5OmegaTrajectoryEvaluatorArguments):
+    evaluator_type: str = field(default="qwen3_5_omni_head_sf_omega")
+    model_type: str = field(default="qwen3_5_omni_head_sf_omega")
+    num_history: int = field(default=20)
+    action_chunk_num: int = field(default=5)
+    trajectory_horizon: int = field(default=5)
+    omni_waypoint_number: int = field(default=5)
+    omni_action_dim: int = field(default=4)
+    omni_step_scale: float = field(default=0.3)
+    omni_norm_method: str = field(default="min_max_split_arrive")
+    omni_coord_scale: float = field(default=8.0)
+    omni_flow_hidden_dim: Optional[int] = field(default=None)
+    omni_flow_layers: int = field(default=16)
+    omni_flow_heads: int = field(default=32)
+    omni_flow_dropout: float = field(default=0.2)
+    omni_num_inference_timesteps: int = field(default=10)
+    omni_num_timestep_buckets: int = field(default=100)
+    omni_noise_beta_alpha: float = field(default=1.5)
+    omni_noise_beta_beta: float = field(default=1.0)
+    omni_noise_s: float = field(default=0.999)
+    omni_query_action_layers: int = field(default=1)
+    omni_use_arrive_list: bool = field(default=True)
+    waypoint_stall_distance: float = field(default=0.05)
 
 
 class Qwen3_5OmegaTrajectoryEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
@@ -347,3 +373,200 @@ class Qwen3_5OmegaDiTTrajectoryEvaluator(Qwen3_5OmegaTrajectoryEvaluator):
 
 class Qwen3_5OmegaNextDiTTrajectoryEvaluator(Qwen3_5OmegaTrajectoryEvaluator):
     ARGUMENT_CLASS = Qwen3_5OmegaNextDiTTrajectoryEvaluatorArguments
+
+
+class Qwen3_5OmegaOmniEvaluator(Qwen3_5OmegaSpatialForcingEvaluator):
+    ARGUMENT_CLASS = Qwen3_5OmegaOmniEvaluatorArguments
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.action_chunk_num = int(getattr(self.args, "action_chunk_num", 5))
+        self.omni_step_scale = float(getattr(self.args, "omni_step_scale", 0.3))
+        self.conversation = [
+            {
+                "from": "human",
+                "value": (
+                    "You are an autonomous navigation robot. You will get a task with historical pictures and current pictures you see.\n"
+                    "Based on these information, you need to decide your next {num_action_trunck} actions, which could involve <|left|>,<|right|>,<|forward|>. If you finish your mission, output <|stop|>. Here are some examples: <|left|><|forward|><|forward|><|stop|>, <|forward|><|forward|><|forward|><|left|><|forward|> or <|stop|>\n"
+                    "# Your historical pictures are: {history_img_string}\n"
+                    "# Your current observations is leftside: <image>, frontside: <image>, rightside: <image>\n"
+                    "# Your mission is: <instruction><|NAV|>\n"
+                    "Output the waypoint"
+                ),
+            },
+            {"from": "gpt", "value": ""},
+        ]
+
+    def _history_indices(self, step_id: int, rgb_count: int) -> List[int]:
+        num_history = max(int(self.num_history), 1)
+        if rgb_count <= 1:
+            return [0] * num_history
+        latest = rgb_count - 1
+        if latest < num_history:
+            indices = list(range(latest)) + [max(latest - 1, 0)] * (num_history - latest)
+        else:
+            indices = np.linspace(0, latest - 1, num_history, dtype=np.int32).tolist()
+        return [int(max(min(idx, latest), 0)) for idx in indices[:num_history]]
+
+    def prepare_omni_inputs(self, step_id, episode, rgb_list):
+        history_id = self._history_indices(step_id, len(rgb_list))
+        current = rgb_list[-1]
+        prompt = self.conversation[0]["value"].format(
+            num_action_trunck=self.action_chunk_num,
+            history_img_string="<image>" * len(history_id),
+        )
+        prompt = prompt.replace("<instruction>", episode.instruction.instruction_text)
+        source = {
+            "image": [rgb_list[idx] for idx in history_id] + [current, current, current],
+            "conversations": [
+                {"from": "human", "value": prompt},
+                {"from": "gpt", "value": ""},
+            ],
+        }
+        processor_source = self.prepare_processor_source(source)
+        messages = build_messages(processor_source)
+        inputs = self.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self.model.device)
+        if os.environ.get("JOYNAV_OMNI_EVAL_DEBUG", "0") == "1":
+            print(
+                f"episode_id-{episode.episode_id} step_id-{step_id} === omni history_id: {history_id} === "
+                f"decoded input_ids: ```{self.decode_input_ids(inputs['input_ids'])}```"
+            )
+        return inputs
+
+    def _should_stop(self, arrive_pred: torch.Tensor) -> bool:
+        arrive_logits = arrive_pred.detach().float().reshape(-1)
+        return bool(torch.all(arrive_logits > float(self.args.stop_threshold)).item())
+
+    def _waypoint_actions(self, wp_pred: torch.Tensor, sin_angle: torch.Tensor, cos_angle: torch.Tensor) -> List[int]:
+        waypoints = wp_pred.detach().float().cpu()
+        if waypoints.dim() == 3:
+            waypoints = waypoints[0]
+        angles = torch.atan2(sin_angle.detach().float().cpu(), cos_angle.detach().float().cpu())
+        if angles.dim() == 2:
+            angles = angles[0]
+        trajectory = torch.zeros(waypoints.shape[0], 3, dtype=torch.float32)
+        trajectory[:, :2] = waypoints[:, :2] * self.omni_step_scale
+        trajectory[:, 2] = angles[: waypoints.shape[0]]
+        actions = trajectory_to_discrete_actions_3d(
+            trajectory,
+            forward_step=float(self.config.habitat.simulator.forward_step_size),
+            turn_angle_deg=float(self.config.habitat.simulator.turn_angle),
+            max_actions=int(self.action_chunk_num),
+            stall_distance=float(self.args.waypoint_stall_distance),
+        )[0]
+        replan_every = max(int(self.args.replan_every), 1)
+        return (actions[:replan_every] if len(actions) > replan_every else actions) or [0]
+
+    def eval_action(self, idx) -> None:
+        self.model.eval()
+        env = self.config_env()
+        scene_episode_dict = {}
+        episodes = copy.deepcopy(env.episodes)
+        if self.args.limit > 0:
+            random.seed(42)
+            random.shuffle(episodes)
+            episodes = episodes[: self.args.limit]
+        for episode in episodes:
+            scene_episode_dict.setdefault(episode.scene_id, []).append(episode)
+
+        sucs, spls, oss, nes, ndtws = [], [], [], [], []
+        done_res = []
+        result_path = os.path.join(self.output_path, "result.json")
+        if os.path.exists(result_path):
+            with open(result_path, "r") as file:
+                for line in file:
+                    res = json.loads(line)
+                    done_res.append([res["scene_id"], res["episode_id"], res["episode_instruction"]])
+                    if get_rank() == 0:
+                        sucs.append(res["success"])
+                        spls.append(res["spl"])
+                        oss.append(res["os"])
+                        nes.append(res["ne"])
+                        ndtws.append(res.get("ndtw", 0))
+
+        for scene in sorted(scene_episode_dict.keys()):
+            scene_id = scene.split("/")[-2]
+            episodes = scene_episode_dict[scene]
+            process_bar = tqdm.tqdm(range(len(episodes[idx :: self.env_num])), desc=f"scene {scene_id}")
+            for episode in episodes[idx :: self.env_num]:
+                episode_instruction = (
+                    episode.instruction.instruction_text
+                    if "objectnav" not in self.config_path
+                    else episode.object_category
+                )
+                episode_id = int(episode.episode_id)
+                if [scene_id, episode_id, episode_instruction] in done_res:
+                    continue
+
+                env.current_episode = episode
+                observations = env.reset()
+                vis_frames = []
+                step_id = 0
+                rgb_list = []
+                action_seq = []
+
+                while not env.episode_over and step_id <= 500:
+                    image = Image.fromarray(observations["rgb"]).convert("RGB")
+                    rgb_list.append(image)
+                    info = env.get_metrics()
+                    if info["top_down_map"] is not None:
+                        vis_frames.append(observations_to_image({"rgb": np.asarray(image)}, info))
+
+                    if len(action_seq) == 0:
+                        inputs = self.prepare_omni_inputs(step_id, episode, rgb_list)
+                        with torch.no_grad():
+                            outputs = self.model.predict_waypoints(**inputs)
+                        if self._should_stop(outputs.arrive_pred):
+                            action_seq = [0]
+                        else:
+                            action_seq = self._waypoint_actions(outputs.wp_pred, outputs.sin_angle, outputs.cos_angle)
+                        if os.environ.get("JOYNAV_OMNI_EVAL_DEBUG", "0") == "1":
+                            print(
+                                f"episode_id-{episode.episode_id} step_id-{step_id} === "
+                                f"wp_pred={outputs.wp_pred.detach().float().cpu().tolist()} "
+                                f"arrive={outputs.arrive_pred.detach().float().cpu().tolist()} action_seq={action_seq}"
+                            )
+
+                    observations = env.step(action_seq.pop(0))
+                    step_id += 1
+
+                process_bar.update(1)
+                metrics = env.get_metrics()
+                if self.should_save_navigation_video(metrics):
+                    video_dir = os.path.join(self.output_path, f"vis_{self.epoch}", f"{scene_id}")
+                    os.makedirs(video_dir, exist_ok=True)
+                    images_to_video(vis_frames, video_dir, f"{episode_id:04d}", fps=6, quality=9)
+                vis_frames.clear()
+
+                sucs.append(metrics["success"])
+                spls.append(metrics["spl"])
+                oss.append(metrics["oracle_success"])
+                nes.append(metrics["distance_to_goal"])
+                ndtws.append(metrics.get("ndtw", 0))
+                result = {
+                    "scene_id": scene_id,
+                    "episode_id": episode_id,
+                    "success": metrics["success"],
+                    "spl": metrics["spl"],
+                    "os": metrics["oracle_success"],
+                    "ne": metrics["distance_to_goal"],
+                    "ndtw": metrics.get("ndtw", 0),
+                    "steps": step_id,
+                    "episode_instruction": episode_instruction,
+                }
+                with open(result_path, "a") as file:
+                    file.write(json.dumps(result) + "\n")
+        env.close()
+        return (
+            torch.tensor(sucs).to(self.device),
+            torch.tensor(spls).to(self.device),
+            torch.tensor(oss).to(self.device),
+            torch.tensor(nes).to(self.device),
+            torch.tensor(ndtws).to(self.device),
+            torch.tensor(len(sucs)).to(self.device),
+        )

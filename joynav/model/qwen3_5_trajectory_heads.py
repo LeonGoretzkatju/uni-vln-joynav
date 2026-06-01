@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from transformers.feature_extraction_utils import BatchFeature
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
@@ -348,6 +349,188 @@ class TrajectoryNextDiTHead(nn.Module):
         return latents.mean(dim=1)
 
 
+class OmniHeadBlock(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+        self.norm2 = nn.LayerNorm(hidden_dim)
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        attn_out, _ = self.mha(q, k, v)
+        out = self.norm1(q + attn_out)
+        return self.norm2(out + self.ffn(out))
+
+
+class OmniActionFormerHead(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int = 4, num_blocks: int = 2):
+        super().__init__()
+        self.blocks = nn.ModuleList([OmniHeadBlock(hidden_dim, num_heads) for _ in range(num_blocks)])
+
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        for block in self.blocks:
+            q = block(q, k, v)
+        return q
+
+
+class OmniTimestepEncoder(nn.Module):
+    def __init__(self, embedding_dim: int):
+        super().__init__()
+        self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=1)
+        self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
+
+    def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
+        dtype = next(self.parameters()).dtype
+        return self.timestep_embedder(self.time_proj(timesteps).to(dtype))
+
+
+class OmniAdaLayerNorm(nn.Module):
+    def __init__(self, hidden_dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.linear = nn.Linear(hidden_dim, hidden_dim * 2)
+        self.norm = nn.LayerNorm(hidden_dim, elementwise_affine=False, eps=eps)
+
+    def forward(self, x: torch.Tensor, temb: torch.Tensor) -> torch.Tensor:
+        scale, shift = self.linear(F.silu(temb)).chunk(2, dim=-1)
+        return self.norm(x) * (1 + scale[:, None]) + shift[:, None]
+
+
+class OmniFlowBlock(nn.Module):
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = OmniAdaLayerNorm(hidden_dim)
+        self.self_attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.cross_attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm3 = nn.LayerNorm(hidden_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+        )
+
+    def forward(self, action_states: torch.Tensor, vl_states: torch.Tensor, temb: torch.Tensor) -> torch.Tensor:
+        normed = self.norm1(action_states, temb)
+        self_out, _ = self.self_attn(normed, normed, normed, need_weights=False)
+        action_states = action_states + self_out
+        normed = self.norm2(action_states)
+        cross_out, _ = self.cross_attn(normed, vl_states, vl_states, need_weights=False)
+        action_states = action_states + cross_out
+        action_states = action_states + self.ffn(self.norm3(action_states))
+        return action_states
+
+
+class OmniFlowMatchingActionHead(nn.Module):
+    """OmniNav-style flow matching over delta waypoints.
+
+    The target is a normalized delta sequence of shape ``[B, 5, 4]`` containing
+    ``dx, dy, d_sin(theta), d_cos(theta)``. The transformer conditions each noisy
+    action token on the full VLM hidden-state sequence, matching the OmniNav
+    action-head paradigm while staying native to the Qwen3.5/Omega stack.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        action_horizon: int = 5,
+        action_dim: int = 4,
+        hidden_dim: Optional[int] = None,
+        num_layers: int = 8,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+        num_timestep_buckets: int = 100,
+        num_inference_timesteps: int = 10,
+        noise_beta_alpha: float = 1.5,
+        noise_beta_beta: float = 1.0,
+        noise_s: float = 0.999,
+        add_pos_embed: bool = True,
+    ):
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim or input_dim)
+        self.action_horizon = int(action_horizon)
+        self.action_dim = int(action_dim)
+        self.num_timestep_buckets = int(num_timestep_buckets)
+        self.num_inference_timesteps = int(num_inference_timesteps)
+        self.add_pos_embed = bool(add_pos_embed)
+
+        self.condition_projector = nn.Linear(self.input_dim, self.hidden_dim)
+        self.action_encoder = nn.Linear(self.action_dim, self.hidden_dim)
+        self.time_encoder = OmniTimestepEncoder(self.hidden_dim)
+        self.blocks = nn.ModuleList(
+            [OmniFlowBlock(self.hidden_dim, int(num_heads), dropout=float(dropout)) for _ in range(int(num_layers))]
+        )
+        self.norm_out = nn.LayerNorm(self.hidden_dim, elementwise_affine=False, eps=1e-6)
+        self.out_modulation = nn.Linear(self.hidden_dim, self.hidden_dim * 2)
+        self.action_decoder = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.action_dim),
+        )
+        if self.add_pos_embed:
+            self.position_embedding = nn.Embedding(self.action_horizon, self.hidden_dim)
+        self.noise_beta_alpha = float(noise_beta_alpha)
+        self.noise_beta_beta = float(noise_beta_beta)
+        self.noise_s = float(noise_s)
+
+    def sample_time(self, batch_size: int, device, dtype: torch.dtype) -> torch.Tensor:
+        beta_dist = torch.distributions.Beta(
+            torch.tensor(self.noise_beta_alpha, device=device, dtype=torch.float32),
+            torch.tensor(self.noise_beta_beta, device=device, dtype=torch.float32),
+        )
+        sample = beta_dist.sample((batch_size,)).to(dtype=dtype)
+        return ((self.noise_s - sample) / self.noise_s).clamp(0.0, 1.0)
+
+    def _time_buckets(self, t: torch.Tensor) -> torch.Tensor:
+        return (t.clamp(0.0, 1.0) * self.num_timestep_buckets).long().clamp(max=self.num_timestep_buckets - 1)
+
+    def _model(self, noisy_actions: torch.Tensor, vl_features: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
+        vl_states = self.condition_projector(vl_features)
+        action_states = self.action_encoder(noisy_actions)
+        if self.add_pos_embed:
+            pos_ids = torch.arange(action_states.shape[1], device=action_states.device)
+            action_states = action_states + self.position_embedding(pos_ids).unsqueeze(0)
+
+        temb = self.time_encoder(timesteps)
+        for block in self.blocks:
+            action_states = block(action_states, vl_states, temb)
+        shift, scale = self.out_modulation(F.silu(temb)).chunk(2, dim=-1)
+        action_states = self.norm_out(action_states) * (1 + scale[:, None]) + shift[:, None]
+        return self.action_decoder(action_states)
+
+    def flow_matching_loss(self, vl_features: torch.Tensor, target_actions: torch.Tensor) -> torch.Tensor:
+        target_actions = target_actions.to(device=vl_features.device, dtype=vl_features.dtype)
+        noise = torch.randn_like(target_actions)
+        t = self.sample_time(target_actions.shape[0], device=target_actions.device, dtype=target_actions.dtype)
+        noisy_actions = (1 - t[:, None, None]) * noise + t[:, None, None] * target_actions
+        velocity = target_actions - noise
+        pred = self._model(noisy_actions, vl_features, self._time_buckets(t))
+        return F.mse_loss(pred.float(), velocity.float(), reduction="mean")
+
+    @torch.no_grad()
+    def forward(self, vl_features: torch.Tensor, num_inference_timesteps: Optional[int] = None) -> torch.Tensor:
+        num_steps = int(num_inference_timesteps or self.num_inference_timesteps)
+        actions = torch.randn(
+            vl_features.shape[0],
+            self.action_horizon,
+            self.action_dim,
+            device=vl_features.device,
+            dtype=vl_features.dtype,
+        )
+        dt = 1.0 / max(num_steps, 1)
+        for i in range(num_steps):
+            t = torch.full((vl_features.shape[0],), i * dt, device=vl_features.device, dtype=vl_features.dtype)
+            velocity = self._model(actions, vl_features, self._time_buckets(t))
+            actions = actions + dt * velocity
+        return actions
+
+
 @dataclass
 class Qwen35OmegaTrajectoryArguments(JoyNav_Qwen3_5OmegaSpatialForcingArguments):
     propagate_action_head_grad: bool = field(default=True)
@@ -368,6 +551,22 @@ class Qwen35OmegaTrajectoryArguments(JoyNav_Qwen3_5OmegaSpatialForcingArguments)
     nextdit_num_inference_steps: int = field(default=10)
     nextdit_num_sample_trajs: int = field(default=1)
     nextdit_guidance_scale: float = field(default=1.0)
+    omni_waypoint_number: int = field(default=5)
+    omni_action_dim: int = field(default=4)
+    omni_step_scale: float = field(default=0.3)
+    omni_norm_method: str = field(default="min_max_split_arrive")
+    omni_coord_scale: float = field(default=8.0)
+    omni_flow_hidden_dim: Optional[int] = field(default=None)
+    omni_flow_layers: int = field(default=16)
+    omni_flow_heads: int = field(default=32)
+    omni_flow_dropout: float = field(default=0.2)
+    omni_num_inference_timesteps: int = field(default=10)
+    omni_num_timestep_buckets: int = field(default=100)
+    omni_noise_beta_alpha: float = field(default=1.5)
+    omni_noise_beta_beta: float = field(default=1.0)
+    omni_noise_s: float = field(default=0.999)
+    omni_query_action_layers: int = field(default=1)
+    omni_use_arrive_list: bool = field(default=True)
 
 
 class Qwen35OmegaTrajectoryMixin:
@@ -687,4 +886,242 @@ class JoyNav_Qwen3_5OmegaNextDiTForCausalLM(
         hidden_states = self._trajectory_hidden_states(outputs)
         outputs.action_pred = self.action_head(hidden_states[:, -1])
         outputs.stop_logit = self._predict_stop_logit(hidden_states[:, -1])
+        return outputs
+
+
+class JoyNav_Qwen3_5OmegaOmniForCausalLM(
+    Qwen35OmegaTrajectoryMixin,
+    JoyNav_Qwen3_5OmegaSpatialForcingForCausalLM,
+):
+    ARGUMENT_CLASS = Qwen35OmegaTrajectoryArguments
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.waypoint_number = int(getattr(config, "omni_waypoint_number", getattr(config, "trajectory_horizon", 5)))
+        self.omni_action_dim = int(getattr(config, "omni_action_dim", 4))
+        self.omni_step_scale = float(getattr(config, "omni_step_scale", 0.3))
+        self.omni_norm_method = str(getattr(config, "omni_norm_method", "min_max_split_arrive"))
+        self.omni_coord_scale = float(getattr(config, "omni_coord_scale", 8.0))
+        self.config.trajectory_horizon = self.waypoint_number
+        self.config.trajectory_dim = 3
+        self.config.omni_waypoint_number = self.waypoint_number
+        self.config.omni_action_dim = self.omni_action_dim
+        hidden_size = config.text_config.hidden_size
+        self.action_head = OmniFlowMatchingActionHead(
+            input_dim=hidden_size,
+            action_horizon=self.waypoint_number,
+            action_dim=self.omni_action_dim,
+            hidden_dim=getattr(config, "omni_flow_hidden_dim", None),
+            num_layers=int(getattr(config, "omni_flow_layers", 16)),
+            num_heads=int(getattr(config, "omni_flow_heads", 32)),
+            dropout=float(getattr(config, "omni_flow_dropout", 0.2)),
+            num_timestep_buckets=int(getattr(config, "omni_num_timestep_buckets", 100)),
+            num_inference_timesteps=int(getattr(config, "omni_num_inference_timesteps", 10)),
+            noise_beta_alpha=float(getattr(config, "omni_noise_beta_alpha", 1.5)),
+            noise_beta_beta=float(getattr(config, "omni_noise_beta_beta", 1.0)),
+            noise_s=float(getattr(config, "omni_noise_s", 0.999)),
+        )
+        self.query_action = nn.Parameter(torch.empty(1, 1, hidden_size))
+        query_layers = int(getattr(config, "omni_query_action_layers", 2))
+        if query_layers <= 1:
+            self.query_multihead_attn = nn.MultiheadAttention(hidden_size, num_heads=4, batch_first=True)
+            self.query_multihead_multi_attn = None
+        else:
+            self.query_multihead_attn = None
+            self.query_multihead_multi_attn = OmniActionFormerHead(hidden_size, num_heads=4, num_blocks=query_layers)
+        arrive_dim = self.waypoint_number if bool(getattr(config, "omni_use_arrive_list", True)) else 1
+        self.arrive_predictor = nn.Linear(hidden_size, arrive_dim)
+        self._init_omni_weights()
+
+    def _init_omni_weights(self):
+        nn.init.normal_(self.query_action, mean=0.0, std=0.02)
+        nn.init.normal_(self.arrive_predictor.weight, mean=0.0, std=0.02)
+        nn.init.constant_(self.arrive_predictor.bias, -2.0)
+
+    def post_update_model(self):
+        parent_post_update = getattr(super(), "post_update_model", None)
+        if parent_post_update is not None:
+            parent_post_update()
+        missing_keys = (getattr(self, "_hf_loading_info", {}) or {}).get("missing_keys", []) or []
+        if any(key.startswith("action_head.") for key in missing_keys):
+            self.action_head.apply(self._init_weights)
+        if any(key.startswith("arrive_predictor.") or key == "query_action" for key in missing_keys):
+            self._init_omni_weights()
+
+    def _action_feature(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        query_action = self.query_action.expand(hidden_states.shape[0], -1, -1)
+        if self.query_multihead_attn is not None:
+            action_feature, _ = self.query_multihead_attn(query_action, hidden_states, hidden_states)
+        else:
+            action_feature = self.query_multihead_multi_attn(query_action, hidden_states, hidden_states)
+        return action_feature.squeeze(1)
+
+    def _norm_from_config(self, device, dtype):
+        norm = getattr(self.config, "omni_norm", None)
+        if isinstance(norm, dict) and "min" in norm and "max" in norm:
+            return {
+                "min": torch.tensor(norm["min"], device=device, dtype=dtype),
+                "max": torch.tensor(norm["max"], device=device, dtype=dtype),
+            }
+        return None
+
+    def _coerce_norm(self, norm, device, dtype, batch_size: int):
+        if norm is None:
+            norm = self._norm_from_config(device, dtype)
+        elif isinstance(norm, list) and norm:
+            norm = norm[0]
+        if isinstance(norm, dict) and "min" in norm and "max" in norm:
+            min_vals = norm["min"]
+            max_vals = norm["max"]
+            if not torch.is_tensor(min_vals):
+                min_vals = torch.tensor(min_vals, device=device, dtype=dtype)
+            else:
+                min_vals = min_vals.to(device=device, dtype=dtype)
+            if not torch.is_tensor(max_vals):
+                max_vals = torch.tensor(max_vals, device=device, dtype=dtype)
+            else:
+                max_vals = max_vals.to(device=device, dtype=dtype)
+            if min_vals.dim() == 2:
+                min_vals = min_vals.unsqueeze(0).expand(batch_size, -1, -1)
+            if max_vals.dim() == 2:
+                max_vals = max_vals.unsqueeze(0).expand(batch_size, -1, -1)
+            return min_vals, max_vals
+        return None, None
+
+    def _action_norm(self, norm, action_dim: int, device, dtype, batch_size: int):
+        min_vals, max_vals = self._coerce_norm(norm, device, dtype, batch_size)
+        if min_vals is None or max_vals is None:
+            return None, None
+        return min_vals[..., :action_dim], max_vals[..., :action_dim]
+
+    def _waypoints_to_delta_actions(self, gt_waypoints, gt_heading_angles=None):
+        gt_waypoints = gt_waypoints[:, : self.waypoint_number, :]
+        xy = gt_waypoints[..., :2]
+        if gt_heading_angles is not None:
+            angle = gt_heading_angles[:, : self.waypoint_number].to(device=gt_waypoints.device, dtype=gt_waypoints.dtype)
+        elif gt_waypoints.shape[-1] >= 3:
+            angle = gt_waypoints[..., 2]
+        else:
+            angle = torch.zeros_like(xy[..., 0])
+        absolute = torch.cat([xy, torch.sin(angle).unsqueeze(-1), torch.cos(angle).unsqueeze(-1)], dim=-1)
+        delta = torch.zeros_like(absolute)
+        delta[:, 0] = absolute[:, 0]
+        delta[:, 1:] = absolute[:, 1:] - absolute[:, :-1]
+        return delta
+
+    def _normalize_delta_actions(self, delta_actions: torch.Tensor, norm=None) -> torch.Tensor:
+        min_vals, max_vals = self._action_norm(
+            norm,
+            delta_actions.shape[-1],
+            delta_actions.device,
+            delta_actions.dtype,
+            delta_actions.shape[0],
+        )
+        if self.omni_norm_method in {"min_max", "min_max_split_arrive"}:
+            if min_vals is None or max_vals is None:
+                raise ValueError(f"omni_norm with min/max is required for {self.omni_norm_method}")
+            return ((delta_actions - min_vals) / (max_vals - min_vals + 1e-8)) * 2 - 1
+        if self.omni_norm_method != "coord_scale":
+            raise ValueError(f"Unsupported omni_norm_method: {self.omni_norm_method}")
+        scale = torch.tensor(
+            [self.omni_coord_scale, self.omni_coord_scale, 1.0, 1.0],
+            device=delta_actions.device,
+            dtype=delta_actions.dtype,
+        )
+        return delta_actions / scale
+
+    def _denormalize_delta_actions(self, delta_actions: torch.Tensor, norm=None) -> torch.Tensor:
+        min_vals, max_vals = self._action_norm(
+            norm,
+            delta_actions.shape[-1],
+            delta_actions.device,
+            delta_actions.dtype,
+            delta_actions.shape[0],
+        )
+        if self.omni_norm_method in {"min_max", "min_max_split_arrive"}:
+            if min_vals is None or max_vals is None:
+                raise ValueError(f"omni_norm with min/max is required for {self.omni_norm_method}")
+            return ((delta_actions + 1) / 2) * (max_vals - min_vals + 1e-8) + min_vals
+        if self.omni_norm_method != "coord_scale":
+            raise ValueError(f"Unsupported omni_norm_method: {self.omni_norm_method}")
+        scale = torch.tensor(
+            [self.omni_coord_scale, self.omni_coord_scale, 1.0, 1.0],
+            device=delta_actions.device,
+            dtype=delta_actions.dtype,
+        )
+        return delta_actions * scale
+
+    def _decode_waypoint_prediction(self, normalized_delta: torch.Tensor, norm=None):
+        delta = self._denormalize_delta_actions(normalized_delta, norm=norm)
+        absolute = torch.cumsum(delta, dim=1)
+        return absolute[..., :2], absolute[..., 2], absolute[..., 3]
+
+    def forward(
+        self,
+        *args,
+        sf_image_tensors=None,
+        gt_waypoints=None,
+        gt_heading_angles=None,
+        arrive=None,
+        arrive_list=None,
+        input_waypoints=None,
+        step_scale=None,
+        norm=None,
+        action_former=True,
+        drop_arrive_loss=None,
+        train=True,
+        train_branch=None,
+        **kwargs,
+    ):
+        kwargs.pop("labels", None)
+        kwargs["output_hidden_states"] = True
+        outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
+        hidden_states = self._trajectory_hidden_states(outputs)
+
+        if gt_waypoints is not None and torch.is_tensor(gt_waypoints):
+            delta_actions = self._waypoints_to_delta_actions(gt_waypoints, gt_heading_angles=gt_heading_angles)
+            target_actions = self._normalize_delta_actions(delta_actions, norm=norm)
+            action_loss = self.action_head.flow_matching_loss(hidden_states, target_actions)
+            action_feature = self._action_feature(hidden_states)
+            arrive_pred = self.arrive_predictor(action_feature)
+            arrive_loss = None
+            if arrive_list is not None and arrive_pred.shape[-1] == self.waypoint_number:
+                arrive_loss = F.binary_cross_entropy_with_logits(
+                    arrive_pred.float(),
+                    arrive_list.to(device=arrive_pred.device, dtype=torch.float32),
+                )
+            elif arrive is not None:
+                arrive_loss = F.binary_cross_entropy_with_logits(
+                    arrive_pred.float().reshape(arrive.shape[0], -1)[:, :1],
+                    arrive.to(device=arrive_pred.device, dtype=torch.float32).reshape(-1, 1),
+                )
+            total_loss = action_loss * float(getattr(self._trajectory_args(), "action_head_loss_weight", 1.0))
+            if arrive_loss is not None:
+                total_loss = total_loss + arrive_loss * float(getattr(self._trajectory_args(), "stop_head_loss_weight", 1.0))
+            outputs.loss = total_loss if outputs.loss is None else outputs.loss + total_loss
+            outputs.action_loss = action_loss.detach()
+            outputs.arrive_loss = arrive_loss.detach() if arrive_loss is not None else None
+            outputs.arrive_pred = arrive_pred
+        else:
+            outputs.action_loss = None
+            outputs.arrive_loss = None
+
+        outputs = self._add_spatial_forcing_loss(outputs, kwargs, sf_image_tensors)
+        if train is False:
+            wp_pred, sin_pred, cos_pred = self._decode_waypoint_prediction(self.action_head(hidden_states), norm=norm)
+            arrive_pred = self.arrive_predictor(self._action_feature(hidden_states))
+            return wp_pred, arrive_pred, sin_pred, cos_pred
+        return outputs
+
+    @torch.no_grad()
+    def predict_waypoints(self, *args, norm=None, **kwargs):
+        kwargs.pop("labels", None)
+        kwargs["output_hidden_states"] = True
+        outputs = super().forward(*args, labels=None, sf_image_tensors=None, **kwargs)
+        hidden_states = self._trajectory_hidden_states(outputs)
+        wp_pred, sin_pred, cos_pred = self._decode_waypoint_prediction(self.action_head(hidden_states), norm=norm)
+        outputs.wp_pred = wp_pred
+        outputs.arrive_pred = self.arrive_predictor(self._action_feature(hidden_states))
+        outputs.sin_angle = sin_pred
+        outputs.cos_angle = cos_pred
         return outputs

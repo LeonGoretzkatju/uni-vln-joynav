@@ -32,6 +32,7 @@ from joynav.eval.qwen3_5_omega_trajectory_head_evaluator import (
     Qwen3_5OmegaDiTTrajectoryEvaluator,
     Qwen3_5OmegaMLPTrajectoryEvaluator,
     Qwen3_5OmegaNextDiTTrajectoryEvaluator,
+    Qwen3_5OmegaOmniEvaluator,
 )
 
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
@@ -45,6 +46,7 @@ register_component('evaluator', 'qwen3_5_lm_head_sf_omega', Qwen3_5OmegaSpatialF
 register_component('evaluator', 'qwen3_5_mlp_head_sf_omega', Qwen3_5OmegaMLPTrajectoryEvaluator)
 register_component('evaluator', 'qwen3_5_dit_head_sf_omega', Qwen3_5OmegaDiTTrajectoryEvaluator)
 register_component('evaluator', 'qwen3_5_nextdit_head_sf_omega', Qwen3_5OmegaNextDiTTrajectoryEvaluator)
+register_component('evaluator', 'qwen3_5_omni_head_sf_omega', Qwen3_5OmegaOmniEvaluator)
 
 OMEGA_MODEL_CONFIG_FIELDS = (
     "omega_mode",
@@ -61,6 +63,7 @@ OMEGA_MODEL_TYPES = {
     "qwen3_5_mlp_head_sf_omega",
     "qwen3_5_dit_head_sf_omega",
     "qwen3_5_nextdit_head_sf_omega",
+    "qwen3_5_omni_head_sf_omega",
 }
 
 TRAJECTORY_MODEL_CONFIG_FIELDS = (
@@ -81,6 +84,22 @@ TRAJECTORY_MODEL_CONFIG_FIELDS = (
     "nextdit_num_inference_steps",
     "nextdit_num_sample_trajs",
     "nextdit_guidance_scale",
+    "omni_waypoint_number",
+    "omni_action_dim",
+    "omni_step_scale",
+    "omni_norm_method",
+    "omni_coord_scale",
+    "omni_flow_hidden_dim",
+    "omni_flow_layers",
+    "omni_flow_heads",
+    "omni_flow_dropout",
+    "omni_num_inference_timesteps",
+    "omni_num_timestep_buckets",
+    "omni_noise_beta_alpha",
+    "omni_noise_beta_beta",
+    "omni_noise_s",
+    "omni_query_action_layers",
+    "omni_use_arrive_list",
 )
 
 

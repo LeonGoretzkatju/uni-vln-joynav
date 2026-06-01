@@ -261,6 +261,10 @@ def train(attn_implementation="flash_attention_2"):
         data_args.omega_mode = model_args.omega_mode
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
+    train_dataset = data_module.get("train_dataset")
+    if train_dataset is not None and getattr(train_dataset, "omni_norm", None) is not None:
+        model.config.omni_norm = train_dataset.omni_norm
+        rank0_print("Loaded Omni waypoint normalization statistics into model config.")
 
     # Resize model embeddings if tokenizer vocabulary has been extended
     model_vocab_size = model.get_input_embeddings().weight.shape[0]
