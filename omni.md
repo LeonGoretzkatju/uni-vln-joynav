@@ -94,7 +94,7 @@ The training generator writes OmniNav-style JSON records. Each record has:
       }
     }
   ],
-  "images": ["20 history images", "left current", "front current", "right current"]
+  "images": ["N history images (front)", "front current"]
 }
 ```
 
@@ -166,9 +166,9 @@ The exact OmniNav API fields `action_former`, `input_waypoints`, `step_scale`, `
 
 `Qwen3_5OmegaOmniEvaluator` is modeled after `waypoint_agent.py` but integrated into `joynav/eval`.
 
-Prompt and image construction:
+Prompt and image construction (see "Update 2026-06-02" — single front current image):
 
-- Use 20 history images plus 3 current observation slots.
+- Use `N` history images (front) plus **1** current front image (total `N+1`).
 - Use the same navigation instruction style and `<|NAV|>` token as the OmniNav demo data.
 - Build Qwen messages through the existing JD-VLN processor path.
 
@@ -298,11 +298,103 @@ For a real cluster run, keep `OMNI_HISTORY_IMAGES` identical between train and e
 `OMNI_MAX_SAMPLES` well above the 300-sample smoke default, and set `REGENERATE_OMNI_JSON=0`
 once the dataset JSON is built.
 
+## Update 2026-06-02 (single-front current observation + 2×24 GB memory feasibility)
+
+This section reflects the current code state — read it first in a new session; it supersedes
+the older "3 current slots / 23-image" descriptions above.
+
+### Design change: single front current image (no 3-image current slot)
+
+The current observation is now a **single front image**. Earlier it used three current slots
+(triplicated front, then a short-lived real left/front/right panorama). OmniNav *training* is
+front-only (its `train_code` is camera-agnostic; the 3-camera split lives only in the inference
+agent), and JD-VLN's source data (R2R / RxR / InternData-N1) is front-only — so to keep train and
+eval input distributions consistent, both use sparse front history + one front current frame.
+
+- Prompt (generator + evaluator): `# Your current observation is frontside: <image>`.
+- Images per record: `N` front history + `1` front current = **N+1** (history=20 → 21 images / 21 `<image>`).
+- `scripts/data/generate_omni_waypoint_json.py`: builds `history + [current]` (was `+ [current, current, current]`).
+- `joynav/eval/qwen3_5_omega_trajectory_head_evaluator.py` (`Qwen3_5OmegaOmniEvaluator`):
+  `prepare_omni_inputs(step_id, episode, rgb_list)` → `image = [history…] + [current]`; the eval
+  loop reads only `observations["rgb"]`. No `_current_views` / panorama / `omni_use_panorama`.
+- Removed the panorama experiment: deleted `configs/omni_r2r.yaml` and
+  `joynav/eval/omni_panorama_sensors.py`. Eval default config is `configs/vln_r2r.yaml` (single
+  front RGB sensor).
+- Prompt-token binding note: JD-VLN's `_build_messages` (`joynav/dataset/lazy_supervised_dataset.py`)
+  `re.split`s on `<image>` and pops images in order, so the `<image>` markers in the template bind
+  to images positionally — this is the equivalent of OmniNav's `nav_version=='special_token'`
+  strip-and-reinsert trick, so that Qwen2.5 workaround was NOT copied.
+
+### Precision: use bf16, not fp16, for full fine-tuning
+
+fp16 full fine-tuning is numerically unstable here — DeepSpeed's dynamic loss scaler underflows
+(`Exception: Current loss scale already at minimum`) and aborts mid-run (observed at step 17/20).
+**bf16 has no loss scaler and trains stably**, and it works even on the Turing TITAN RTX test cards
+(emulated, slower). The train script's `BF16` toggle: `BF16=true` (default) → `--bf16`,
+`BF16=false` → `--fp16`. Keep bf16 on the A100/H100 cluster *and* on the Turing test box for full
+FT; fp16 is only safe with most of the model frozen.
+
+### MAX_PIXELS ↔ spatial-forcing teacher
+
+With `omega_mode=text_align_force_qwen` and `spatial_forcing_image_resolution=256`, keep
+`MAX_PIXELS=258048` (the default; matches the known-good `train-qwen3_5-sf-omega-nextdit-traj.sh`).
+Smaller values downscale the Qwen image below the teacher grid and crash with
+`Spatial Forcing target/image-token mismatch`. (`OMEGA_MODE=text_align` interpolates the targets and
+tolerates a small `MAX_PIXELS`.)
+
+### Memory feasibility on 2×24 GB (TITAN RTX, batch 1, GPUs 2,3, MAX_PIXELS=258048)
+
+| history | trainable | precision | result | peak/GPU |
+|---|---|---|---|---|
+| 12 | full (vision+mlp+llm) | fp16 | runs but fp16 loss-scaler crash @ step 17 → use bf16 | ~15 GB |
+| 20 | full | bf16 | **CUDA OOM** @ step 2 (`tried 1.90 GiB, 1.91 free`) | 24.2 GB (ceiling) |
+| 20 | mlp+llm, **vision frozen** (`TUNE_MM_VISION=False`) | bf16 | fits, 30/30 steps, ckpt saved | ~7 GB at load |
+
+Takeaways for the cluster:
+- **history=12 fits full fine-tuning** on 2×24 GB (~15 GB/GPU).
+- **history=20 full FT does NOT fit** on 2×24 GB — growth is activation-dominated by the trainable
+  vision tower over 21 images. For history=20 full FT use ≥40 GB GPUs, or DeepSpeed ZeRO-3/offload
+  (`DEEPSPEED_CONFIG=./scripts/zero3.json`), or freeze the vision tower (`TUNE_MM_VISION=False`).
+
+### Validated 2-GPU recipes (GPUs 2,3)
+
+history=12 full FT, bf16, 20 steps:
+```bash
+OMNI_HISTORY_IMAGES=12 BATCH_SIZE=1 MAX_STEPS=20 SAVE_STEPS=20 \
+MODEL_MAX_LENGTH=32768 BF16=true \
+NPROC_PER_NODE=2 CUDA_GPU_IDS=2,3 \
+OUTPUT_DIR=outputs/omni_h12 bash scripts/train/train-qwen3_5-sf-omega-omni.sh
+```
+
+history=20 (vision frozen to fit 2×24 GB), bf16, 30 steps + 3-episode eval:
+```bash
+OMNI_HISTORY_IMAGES=20 BATCH_SIZE=1 MAX_STEPS=30 SAVE_STEPS=30 \
+MODEL_MAX_LENGTH=32768 BF16=true TUNE_MM_VISION=False \
+NPROC_PER_NODE=2 CUDA_GPU_IDS=2,3 \
+OUTPUT_DIR=outputs/omni_h20_fv bash scripts/train/train-qwen3_5-sf-omega-omni.sh
+
+MODEL_PATH=outputs/omni_h20_fv LIMIT=3 OMNI_HISTORY_IMAGES=20 \
+CUDA_VISIBLE_DEVICES=2 OUTPUT_PATH=outputs/omni_h20_fv/eval3 \
+bash scripts/eval/eval-qwen3_5-sf-omega-omni.sh
+```
+
+Latest history=20 result (30-step toy ckpt, 3 R2R val_unseen episodes — execution check, not a
+quality signal): **SR 0.0%, OSR 66.7%, mean NE 3.46 m** (2/3 episodes reached within the 3 m
+radius; SR=0 because the 30-step arrive head never emits STOP). Always keep `OMNI_HISTORY_IMAGES`
+identical between training and eval.
+
+### Also fixed earlier in this session (2026-06-01)
+
+- `MAX_PIXELS` default raised `50176 → 258048` in both omni train and eval scripts (the old default
+  was too small for the `text_align_force_qwen` SF teacher and would crash a real run, not just the smoke).
+- See the "Review 2026-06-01" section for the norm-clamp, `omni_query_action_layers=1`, hyperparameter
+  alignment, and `BF16` toggle changes.
+
 ## Compatibility Choices
 
 The following differences are intentional JD-VLN compatibility choices:
 
-- JD-VLN Habitat evaluation exposes one RGB observation by default. The Omni evaluator fills the left, front, and right current image slots with that same RGB frame so the prompt and 23-image contract stay intact.
+- The current observation is a **single front image** (see "Update 2026-06-02"). Train and eval both use `N` sparse front history frames plus one front current frame (`N+1` images). The earlier 3-current-slot design (triplicated front, and a short-lived real left/front/right panorama experiment) was removed because OmniNav training is front-only and JD-VLN's source data is front-only.
 - `input_waypoints` is preserved in the JSON and accepted by the model signature, but the current prompt has no `<input_pos*>` tokens. This matches the OmniNav flow setup where the arrival-list path drops input-waypoint conditioning.
 - VGGT-Omega spatial forcing uses JD-VLN's existing `text_align` or `text_align_force_qwen` modes. The Omni action paradigm is copied from OmniNav, while the geometry forcing remains native to the Qwen3.5/Omega implementation.
-- Full 20-history-image training is memory intensive. The default scripts keep the reference-style setting; smoke runs can reduce `OMNI_HISTORY_IMAGES` without changing the registered mode.
+- Full-FT history=20 does not fit on 2×24 GB (OOM); see the "Update 2026-06-02" memory table. history=12 fits full FT on 2×24 GB; history=20 needs bigger GPUs, ZeRO-3/offload, or a frozen vision tower.
