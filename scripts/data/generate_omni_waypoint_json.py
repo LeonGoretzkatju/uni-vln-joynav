@@ -22,7 +22,7 @@ from joynav.dataset.vlnn1_annotation_utils import discrete_actions_to_ego_trajec
 PROMPT_TEMPLATE = """You are an autonomous navigation robot. You will get a task with historical pictures and current pictures you see.
 Based on these information, you need to decide your next {num_action_trunck} actions, which could involve <|left|>,<|right|>,<|forward|>. If you finish your mission, output <|stop|>. Here are some examples: <|left|><|forward|><|forward|><|stop|>, <|forward|><|forward|><|forward|><|left|><|forward|> or <|stop|>
 # Your historical pictures are: {history_img_string}
-# Your current observations is leftside: <image>, frontside: <image>, rightside: <image>
+# Your current observation is frontside: <image>
 # Your mission is: {instruction}<|NAV|>
 Output the waypoint"""
 
@@ -181,7 +181,7 @@ def generate_vlnn1_records(root: str, annotations: List[Dict], args, per_source_
             stop_flags = item.get("stop_flags") or {}
             stop = float(stop_flags.get(str(step), 0.0))
             ins_id = random.randrange(len(instructions))
-            records.append(build_record(instructions[ins_id], history + [current, current, current], waypoints, stop, args))
+            records.append(build_record(instructions[ins_id], history + [current], waypoints, stop, args))
     return records
 
 
@@ -217,7 +217,7 @@ def generate_r2r_records(root: str, annotations: List[Dict], args, per_source_li
                 turn_angle_deg=float(args.r2r_turn_angle),
             )
             ins_id = random.randrange(len(instructions))
-            records.append(build_record(instructions[ins_id], history + [current, current, current], waypoints, stop, args))
+            records.append(build_record(instructions[ins_id], history + [current], waypoints, stop, args))
     return records
 
 
