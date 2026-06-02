@@ -211,6 +211,10 @@ def train(attn_implementation="flash_attention_2"):
             modules_to_save.append("action_latent")
         if getattr(model, "spatial_forcing_projector", None) is not None and "spatial_forcing_projector" not in modules_to_save:
             modules_to_save.append("spatial_forcing_projector")
+        # Omni head submodules are freshly-initialized and must train fully (not via LoRA).
+        for omni_module in ("arrive_predictor", "query_multihead_attn", "query_multihead_multi_attn"):
+            if getattr(model, omni_module, None) is not None and omni_module not in modules_to_save:
+                modules_to_save.append(omni_module)
 
         lora_config = LoraConfig(
             r=model_args.lora_r,
@@ -222,6 +226,12 @@ def train(attn_implementation="flash_attention_2"):
             modules_to_save=modules_to_save if modules_to_save else None,
         )
         model = get_peft_model(model, lora_config)
+        # Bare nn.Parameters (e.g. the Omni action-former `query_action`) cannot be covered by
+        # modules_to_save, so get_peft_model leaves them frozen. Unfreeze them explicitly; the
+        # in-process merge below persists their trained values into the standalone checkpoint.
+        for name, param in model.named_parameters():
+            if name.endswith("query_action"):
+                param.requires_grad = True
         rank0_print("LoRA applied. Trainable parameters:")
         model.print_trainable_parameters()
 
@@ -301,6 +311,35 @@ def train(attn_implementation="flash_attention_2"):
     set_model_use_cache(model, True)
 
     safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+
+    # The eval path loads checkpoints with `model_class.from_pretrained` and cannot consume a
+    # bare LoRA adapter, so optionally merge the adapter into the base weights and write a full
+    # standalone checkpoint (model + processor + config, incl. the baked-in omni_norm).
+    if model_args.use_lora and getattr(model_args, "lora_merge_and_save", False):
+        try:
+            from peft import PeftModel
+
+            merged_dir = os.path.join(training_args.output_dir, "merged")
+            unwrapped = trainer.accelerator.unwrap_model(trainer.model)
+            if isinstance(unwrapped, PeftModel):
+                merged_model = unwrapped.merge_and_unload()
+                save_dtype = (
+                    torch.bfloat16 if training_args.bf16
+                    else torch.float16 if training_args.fp16
+                    else torch.float32
+                )
+                merged_model = merged_model.to(dtype=save_dtype)
+                if trainer.args.should_save:
+                    os.makedirs(merged_dir, exist_ok=True)
+                    merged_model.save_pretrained(merged_dir, safe_serialization=True)
+                    processor.save_pretrained(merged_dir)
+                    rank0_print(f"Merged LoRA checkpoint saved to {merged_dir}")
+            else:
+                rank0_print("lora_merge_and_save set but model is not a PeftModel; skipping merge.")
+        except Exception as exc:  # keep the adapter on disk even if merge fails
+            rank0_print(f"LoRA merge-and-save failed ({exc}); the adapter in output_dir is intact.")
+        finally:
+            trainer.accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":

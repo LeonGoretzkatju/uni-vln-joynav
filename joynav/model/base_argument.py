@@ -29,3 +29,10 @@ class BaseArguments:
         default="",
         metadata={"help": "Comma-separated list of modules to save fully (e.g. action_head,lm_head)"}
     )
+    lora_merge_and_save: bool = field(
+        default=False,
+        metadata={
+            "help": "After LoRA training, merge adapters into the base weights and save a full "
+            "standalone checkpoint under <output_dir>/merged (the eval path cannot load bare adapters)."
+        },
+    )
