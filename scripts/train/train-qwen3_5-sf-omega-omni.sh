@@ -10,7 +10,7 @@ export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
+export ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-$(shuf -i 20001-29999 -n 1)}
@@ -31,7 +31,7 @@ lr=${LR:-1e-5}
 mm_projector_lr=${MM_PROJECTOR_LR:-1e-6}
 batch_size=${BATCH_SIZE:-2}
 num_train_epochs=${NUM_TRAIN_EPOCHS:-5}
-grad_accum_steps=${GRAD_ACCUM_STEPS:-1}
+grad_accum_steps=${GRAD_ACCUM_STEPS:-2}
 # 258048 matches the SF teacher (spatial_forcing_image_resolution=256, patch=16) under
 # omega_mode=text_align_force_qwen, same as the known-good nextdit-traj script. Smaller
 # values downscale the Qwen image below the teacher grid and crash the SF token match.
@@ -45,9 +45,9 @@ gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-0}}
 # Precision: bf16 by default (Ampere+ clusters, matches OmniNav torch_dtype=bfloat16).
 # Set BF16=false on Turing test GPUs (CC 7.5, weak native bf16) to train in fp16.
 precision_flag="--bf16"
-case "${BF16:-true}" in
-    false|False|0|fp16) precision_flag="--fp16" ;;
-esac
+# case "${BF16:-true}" in
+#     false|False|0|fp16) precision_flag="--fp16" ;;
+# esac
 
 num_history=${OMNI_HISTORY_IMAGES:-20}
 waypoint_number=${WAYPOINT_NUMBER:-5}
