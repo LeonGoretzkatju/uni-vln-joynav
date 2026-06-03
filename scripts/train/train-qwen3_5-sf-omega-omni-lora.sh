@@ -10,28 +10,28 @@ export NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE:-1}
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
-export ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-sdpa}
+export ATTN_IMPLEMENTATION=${ATTN_IMPLEMENTATION:-flash_attention_2}
 
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-$(shuf -i 20001-29999 -n 1)}
-NPROC_PER_NODE=${NPROC_PER_NODE:-1}
+NPROC_PER_NODE=${NPROC_PER_NODE:-2}
 
 deepspeed=${DEEPSPEED_CONFIG:-./scripts/zero2.json}
-llm=${MODEL_PATH:-/mnt/nas5/xiangchen/vlm_base/Qwen3.5-4B}
+llm=${MODEL_PATH:-/data1/xiangchen/Qwen/Qwen3.5-4B}
 model_type=qwen3_5_omni_head_sf_omega
 dataset_type=${DATASET_TYPE:-omni_waypoint_sf_omega}
 omega_mode=${OMEGA_MODE:-text_align_force_qwen}
 
-datasets=${DATASETS:-/mnt/nas5/xiangchen/VLNData/InternData-N1/vln_n1/traj_data,/mnt/nas5/xiangchen/VLNData/R2R,/mnt/nas5/xiangchen/VLNData/RxR}
+datasets=${DATASETS:-/data0/lujia/VLNData/InternData-N1/vln_n1/traj_data,/data1/xiangchen/traj_data/R2R,/data1/xiangchen/traj_data/RxR}
 run_name=${RUN_NAME:-qwen3_5_4b_sf_omega_omni_lora}
-output_dir=${OUTPUT_DIR:-./outputs/${run_name}}
-omni_json=${OMNI_JSON:-${output_dir}/omni_waypoint_train.json}
+output_dir=${OUTPUT_DIR:-/data0/xiangchen/outputs/${run_name}}
+omni_json=${OMNI_JSON:-/data1/xiangchen/traj_data/omni_waypoint_train.json}
 
 lr=${LR:-1e-5}
 mm_projector_lr=${MM_PROJECTOR_LR:-1e-6}
 batch_size=${BATCH_SIZE:-2}
-num_train_epochs=${NUM_TRAIN_EPOCHS:-5}
-grad_accum_steps=${GRAD_ACCUM_STEPS:-1}
+num_train_epochs=${NUM_TRAIN_EPOCHS:-2}
+grad_accum_steps=${GRAD_ACCUM_STEPS:-4}
 # 258048 matches the SF teacher (spatial_forcing_image_resolution=256, patch=16) under
 # omega_mode=text_align_force_qwen, same as the known-good nextdit-traj script. Smaller
 # values downscale the Qwen image below the teacher grid and crash the SF token match.
@@ -40,14 +40,11 @@ model_max_length=${MODEL_MAX_LENGTH:-163840}
 max_steps=${MAX_STEPS:--1}
 save_steps=${SAVE_STEPS:-1000}
 save_strategy=${SAVE_STRATEGY:-steps}
-gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-0}}
+gpu_ids=${CUDA_GPU_IDS:-${CUDA_VISIBLE_DEVICES:-1,3}}
 
 # Precision: bf16 by default (Ampere+ clusters, matches OmniNav torch_dtype=bfloat16).
 # Set BF16=false on Turing test GPUs (CC 7.5, weak native bf16) to train in fp16.
 precision_flag="--bf16"
-case "${BF16:-true}" in
-    false|False|0|fp16) precision_flag="--fp16" ;;
-esac
 
 num_history=${OMNI_HISTORY_IMAGES:-20}
 waypoint_number=${WAYPOINT_NUMBER:-5}
@@ -55,7 +52,7 @@ trajectory_stride=${TRAJECTORY_STRIDE:-3}
 sf_alpha=${SF_ALPHA:-0.1}
 sf_align_layers=${SF_ALIGN_LAYERS:-18}
 sf_teacher_layers=${SF_TEACHER_LAYERS:-23}
-sf_geometry_encoder_path=${SF_GEOMETRY_ENCODER_PATH:-/mnt/nas5/xiangchen/vlacode/vggt-omega/facebook/VGGT-Omega/vggt_omega_1b_256_text.pt}
+sf_geometry_encoder_path=${SF_GEOMETRY_ENCODER_PATH:-/data0/lujia/models/VGGT-Omega/vggt_omega_1b_256_text.pt}
 spatial_forcing_image_resolution=${SPATIAL_FORCING_IMAGE_RESOLUTION:-256}
 
 # --- LoRA configuration -------------------------------------------------------
@@ -75,18 +72,6 @@ lora_modules_to_save=${LORA_MODULES_TO_SAVE:-action_head,arrive_predictor,query_
 
 mkdir -p "${output_dir}"
 cp "$(realpath "$0")" "$output_dir"
-
-if [ "${REGENERATE_OMNI_JSON:-1}" = "1" ] || [ ! -s "${omni_json}" ]; then
-    python scripts/data/generate_omni_waypoint_json.py \
-        --video-folder "${datasets}" \
-        --output "${omni_json}" \
-        --max-samples "${OMNI_MAX_SAMPLES:-300}" \
-        --num-history-images "${num_history}" \
-        --waypoint-number "${waypoint_number}" \
-        --trajectory-stride "${trajectory_stride}" \
-        --step-scale "${OMNI_STEP_SCALE:-0.3}" \
-        2>&1 | tee -a "${output_dir}/generate_omni_json.log"
-fi
 
 args="
     --deepspeed ${deepspeed} \
@@ -153,12 +138,12 @@ args="
     --warmup_ratio 0.0 \
     --max_grad_norm 1 \
     --lr_scheduler_type cosine \
-    --logging_steps 1 \
+    --logging_steps 2 \
     --logging_nan_inf_filter False \
     --model_max_length ${model_max_length} \
     --gradient_checkpointing True \
     --ddp_timeout 7200 \
-    --dataloader_num_workers ${DATALOADER_NUM_WORKERS:-0} \
+    --dataloader_num_workers ${DATALOADER_NUM_WORKERS:-4} \
     --run_name ${run_name} \
     --report_to tensorboard"
 
