@@ -108,11 +108,15 @@ def set_model(model_args, model):
     if model_args.tune_mm_llm:
         for n, p in model.language_model.named_parameters():
             p.requires_grad = True
-        model.lm_head.requires_grad = True
+        for p in model.lm_head.parameters():
+            p.requires_grad = True
     else:
         for n, p in model.language_model.named_parameters():
             p.requires_grad = False
-        model.lm_head.requires_grad = False
+        # Setting requires_grad on the Module itself is a no-op; freeze the
+        # parameters (matters for Qwen-VLA T2A, where the whole VLM is frozen).
+        for p in model.lm_head.parameters():
+            p.requires_grad = False
 
 
 def print_trainable_parameters(module):
@@ -275,6 +279,9 @@ def train(attn_implementation="flash_attention_2"):
     if train_dataset is not None and getattr(train_dataset, "omni_norm", None) is not None:
         model.config.omni_norm = train_dataset.omni_norm
         rank0_print("Loaded Omni waypoint normalization statistics into model config.")
+    if train_dataset is not None and getattr(train_dataset, "qwenvla_norm", None) is not None:
+        model.config.qwenvla_norm = train_dataset.qwenvla_norm
+        rank0_print("Loaded Qwen-VLA quantile normalization statistics into model config.")
 
     # Resize model embeddings if tokenizer vocabulary has been extended
     model_vocab_size = model.get_input_embeddings().weight.shape[0]

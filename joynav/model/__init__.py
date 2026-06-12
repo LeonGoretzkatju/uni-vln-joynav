@@ -19,6 +19,7 @@ from .qwen3_5_trajectory_heads import (
     JoyNav_Qwen3_5OmegaNextDiTForCausalLM,
     JoyNav_Qwen3_5OmegaOmniForCausalLM,
 )
+from .qwenvla import JoyNav_QwenVLAForCausalLM
 # from .qwen3_vl_lm_head_geo import (
 #     JoyNav_Qwen3VLGeoForCausalLM,
 #     JoyNav_Qwen3VLGeoForCausalLMWithDynamicRope
@@ -38,6 +39,7 @@ register_component("model", "qwen3_5_mlp_head_sf_omega", JoyNav_Qwen3_5OmegaMLPF
 register_component("model", "qwen3_5_dit_head_sf_omega", JoyNav_Qwen3_5OmegaDiTForCausalLM)
 register_component("model", "qwen3_5_nextdit_head_sf_omega", JoyNav_Qwen3_5OmegaNextDiTForCausalLM)
 register_component("model", "qwen3_5_omni_head_sf_omega", JoyNav_Qwen3_5OmegaOmniForCausalLM)
+register_component("model", "qwenvla", JoyNav_QwenVLAForCausalLM)
 # register_component("model", "qwen3_vl_lm_head_geo", JoyNav_Qwen3VLGeoForCausalLM)
 # register_component("model", "qwen3_vl_lm_head_geo_dyna", JoyNav_Qwen3VLGeoForCausalLMWithDynamicRope)
 

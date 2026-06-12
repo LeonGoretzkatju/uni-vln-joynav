@@ -320,6 +320,38 @@ def create_optimizer(self):
     if self.optimizer is None:
         decay_parameters = self.get_decay_parameter_names(opt_model)
         decay_parameters = [name for name in decay_parameters if "bias" not in name]
+        action_expert_lr = getattr(self.args, "action_expert_lr", None)
+        if action_expert_lr:
+            # Qwen-VLA path: group-wise LRs for backbone vs action decoder
+            # (optionally projector/vision groups), each split by weight decay.
+            def _group_lr(name):
+                if "action_expert" in name:
+                    return action_expert_lr
+                if "merger" in name and self.args.mm_projector_lr:
+                    return self.args.mm_projector_lr
+                if "visual" in name and self.args.vision_tower_lr:
+                    return self.args.vision_tower_lr
+                return None
+
+            buckets = {}
+            for name, param in opt_model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                key = (_group_lr(name), name in decay_parameters)
+                buckets.setdefault(key, []).append(param)
+            optimizer_grouped_parameters = []
+            for (lr, use_decay), params in buckets.items():
+                group = {
+                    "params": params,
+                    "weight_decay": self.args.weight_decay if use_decay else 0.0,
+                }
+                if lr is not None:
+                    group["lr"] = lr
+                optimizer_grouped_parameters.append(group)
+
+            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+            return self.optimizer
         if self.args.mm_projector_lr is not None and self.args.mm_projector_lr != 0:
             projector_parameters = [
                 name for name, _ in opt_model.named_parameters() if "merger" in name

@@ -15,3 +15,7 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     mm_projector_lr: Optional[float] = None
     vision_tower_lr: Optional[float] = None
+    # Qwen-VLA: separate group-wise LR for the DiT action expert (the paper uses
+    # cosine-decayed schedules with separate groups for the VLM backbone and the
+    # action decoder). None -> the expert shares the base learning_rate.
+    action_expert_lr: Optional[float] = None

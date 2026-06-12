@@ -20,6 +20,7 @@ from joynav.dataset.omni_waypoint_dataset import (
     OmniWaypointDataset,
     OmniWaypointOmegaSpatialForcingDataset,
 )
+from joynav.dataset.qwenvla_dataset import QwenVLADataset
 from joynav.dataset.vln_discrete_action_dataset import VLNDiscreteActionDataset
 from joynav.dataset.vln_discrete_action_geo_dataset import VLNDiscreteActionGeoDataset
 
@@ -40,5 +41,6 @@ register_component('dataset', 'continuous_action_mixed', ContinuousActionMixedDa
 register_component('dataset', 'continuous_action_mixed_sf_omega', ContinuousActionMixedOmegaSpatialForcingDataset)
 register_component('dataset', 'omni_waypoint', OmniWaypointDataset)
 register_component('dataset', 'omni_waypoint_sf_omega', OmniWaypointOmegaSpatialForcingDataset)
+register_component('dataset', 'qwenvla', QwenVLADataset)
 register_component('dataset', 'vln_discrete_action', VLNDiscreteActionDataset)
 register_component('dataset', 'vln_discrete_action_geo', VLNDiscreteActionGeoDataset)

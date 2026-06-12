@@ -34,6 +34,7 @@ from joynav.eval.qwen3_5_omega_trajectory_head_evaluator import (
     Qwen3_5OmegaNextDiTTrajectoryEvaluator,
     Qwen3_5OmegaOmniEvaluator,
 )
+from joynav.eval.qwenvla_evaluator import QwenVLAEvaluator
 
 register_component('evaluator', 'streamvln', StreamVLNEvaluator)
 register_component('evaluator', 'qwen3_vl_dit_head', Qwen3VLDiTEvaluator)
@@ -47,6 +48,7 @@ register_component('evaluator', 'qwen3_5_mlp_head_sf_omega', Qwen3_5OmegaMLPTraj
 register_component('evaluator', 'qwen3_5_dit_head_sf_omega', Qwen3_5OmegaDiTTrajectoryEvaluator)
 register_component('evaluator', 'qwen3_5_nextdit_head_sf_omega', Qwen3_5OmegaNextDiTTrajectoryEvaluator)
 register_component('evaluator', 'qwen3_5_omni_head_sf_omega', Qwen3_5OmegaOmniEvaluator)
+register_component('evaluator', 'qwenvla', QwenVLAEvaluator)
 
 OMEGA_MODEL_CONFIG_FIELDS = (
     "omega_mode",
@@ -103,6 +105,24 @@ TRAJECTORY_MODEL_CONFIG_FIELDS = (
 )
 
 
+QWENVLA_MODEL_CONFIG_FIELDS = (
+    "qwenvla_action_horizon",
+    "qwenvla_action_channels",
+    "qwenvla_dit_hidden",
+    "qwenvla_dit_layers",
+    "qwenvla_dit_heads",
+    "qwenvla_dit_mlp_dim",
+    "qwenvla_dit_dropout",
+    "qwenvla_num_inference_steps",
+    "qwenvla_time_dist",
+    "qwenvla_beta_alpha",
+    "qwenvla_beta_beta",
+    "qwenvla_noise_s",
+    "qwenvla_lambda_act",
+    "qwenvla_lambda_vl",
+)
+
+
 def get_explicit_cli_fields(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     fields = set()
@@ -137,6 +157,17 @@ def rank0_print(*args):
 
 def build_model_config(args, explicit_fields=None):
     config = AutoConfig.from_pretrained(args.model_path)
+    if args.model_type == "qwenvla":
+        # Architecture comes from the trained checkpoint config; explicit CLI
+        # flags override only inference-time knobs the user actually passed.
+        explicit_fields = get_explicit_cli_fields() if explicit_fields is None else explicit_fields
+        for field_name in QWENVLA_MODEL_CONFIG_FIELDS:
+            if field_name in explicit_fields and hasattr(args, field_name):
+                setattr(config, field_name, getattr(args, field_name))
+        for field_name in QWENVLA_MODEL_CONFIG_FIELDS:
+            if hasattr(config, field_name) and hasattr(args, field_name):
+                setattr(args, field_name, getattr(config, field_name))
+        return config
     if args.model_type in OMEGA_MODEL_TYPES:
         explicit_fields = get_explicit_cli_fields() if explicit_fields is None else explicit_fields
         config_fields = list(OMEGA_MODEL_CONFIG_FIELDS)
